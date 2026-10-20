@@ -4,6 +4,9 @@ Streamlit aplikácia s **pripravenými reálnymi agregátmi z BigQuery**. Pri ot
 prepínaní grafov ani prepočte cieľového objemu sa do BigQuery nepripája.
 **V Streamlit Cloud netreba nastavovať Google credentials.**
 
+Cache výpočtu zahŕňa SHA-256 zdrojov modelu. Zmena importovaných výpočtov tak
+automaticky zneplatní základný aj cieľový report vrátane jeho schémy.
+
 ## Spustenie
 
 Python 3.12:

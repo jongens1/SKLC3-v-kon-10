@@ -75,3 +75,29 @@ def test_requested_270000_15000_scenario_and_all_views():
     for view in ["Buffer a vznik","Svozy","Dáta a export","Výkon a plán"]:
         test.radio[0].set_value(view).run()
         assert not test.exception
+
+
+def test_changing_model_source_invalidates_warm_streamlit_cache(monkeypatch):
+    import streamlit as st
+    import src.dashboard as dashboard
+    st.cache_data.clear()
+    analyze = dashboard.analyze
+    calls = []
+    def counted(*args,**kwargs):
+        calls.append(1)
+        return analyze(*args,**kwargs)
+    monkeypatch.setattr(dashboard,"analyze",counted)
+    test = app()
+    assert not test.exception
+    assert len(calls) == 1
+    test.run()
+    assert len(calls) == 1
+    read_bytes = Path.read_bytes
+    def changed_source(path):
+        content = read_bytes(path)
+        return content+b"\n# model revision\n" if path.name=="prepicking.py" else content
+    monkeypatch.setattr(Path,"read_bytes",changed_source)
+    test.run()
+    assert not test.exception
+    assert len(calls) == 2
+    st.cache_data.clear()

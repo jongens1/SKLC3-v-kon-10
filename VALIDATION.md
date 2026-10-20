@@ -1,6 +1,6 @@
 # Overenie offline dashboardu
 
-Overené 20. 10. 2026, Python 3.12. Posledný úplný beh: **51 testov prešlo**.
+Overené 20. 10. 2026, Python 3.12. Posledný úplný beh: **52 testov prešlo**.
 Overuje sa aj spustenie Streamlit AppTest so zablokovaným sieťovým pripojením.
 
 ## Reálne dátové kontroly
@@ -68,6 +68,11 @@ Opravené boli dve nezhody: horný graf už neškáluje pôvodný výkon na cie�
 a export už nevymazáva zmeškané termíny neskorým dokončením iných joblines.
 Limit je predvolene zapnutý. Hlavný hodinový export je totožný so zobrazeným
 scenárom; historické referencie sú samostatne označené v úplnom audite.
+
+Kontrola nasadenia odhalila pretrvávajúcu cache reportu z predchádzajúcej verzie
+modelu. Kľúče základného aj cieľového reportu teraz obsahujú SHA-256 všetkých
+výpočtových zdrojov. Regresia najprv zahreje cache, potvrdí jej opätovné použitie,
+potom zmení fingerprint importovaného modelu a overí nové vykonanie výpočtu.
 
 Aplikácia neimportuje BigQuery klienta, nečíta Google credentials a pri používaní
 nevolá query. Konektor a konfigurácia zostávajú iba pre offline prípravu snapshotov.

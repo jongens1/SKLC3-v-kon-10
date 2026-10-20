@@ -1,7 +1,9 @@
 """Offline SKLC3 dashboard: verified bundled aggregates, no runtime BigQuery calls."""
 from __future__ import annotations
 from datetime import date, time
+import hashlib
 import json
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 
@@ -26,6 +28,13 @@ div[data-testid="stRadio"]>div{gap:1.2rem}
 </style>""",unsafe_allow_html=True)
 st.title("Výkon skladu SKLC3")
 
+# Streamlit does not follow imported helper dependencies when hashing a cached
+# function. Fingerprint all calculation sources so a deployment cannot reuse a
+# report produced by an older model or an older report schema.
+MODEL_FINGERPRINT = hashlib.sha256(b"\0".join(
+    (Path(__file__).parent/path).read_bytes() for path in
+    ["src/dashboard.py","src/performance.py","src/prepicking.py","src/data_processing.py"])).hexdigest()
+
 
 def fmt(value: float) -> str:
     return f"{round(value):,}".replace(","," ")
@@ -42,12 +51,12 @@ def prepared(raw,start,end,types):
 
 
 @st.cache_data(max_entries=16,show_spinner="Počítam základný plán…")
-def base_report(data,start,end,safety,throughput):
+def base_report(data,start,end,safety,throughput,model_fingerprint):
     return analyze(data,start,end,float(data.jobline_count.sum()),0,safety,None,throughput)
 
 
 @st.cache_data(max_entries=32,show_spinner="Prepočítavam limit a buffer…")
-def scenario_report(base,target,cap):
+def scenario_report(base,target,cap,model_fingerprint):
     return rescale(base,target,cap)
 
 
@@ -95,7 +104,7 @@ with st.sidebar:
     target = st.number_input("Cieľový objem joblines",min_value=0,value=actual,step=1000,
                              key=f"target_{source}_{day}_{actual}")
     st.caption(f"Základ: {fmt(actual)} joblines pre svozy dňa")
-report = scenario_report(base_report(data,start,end,safety,throughput),target,cap)
+report = scenario_report(base_report(data,start,end,safety,throughput,MODEL_FINGERPRINT),target,cap,MODEL_FINGERPRINT)
 day_frame = report.day
 factor = report.factor
 collections = collection_distribution(data,start,end)
@@ -126,7 +135,7 @@ if view in ["Výkon a plán","Buffer a vznik"]:
         st.plotly_chart(performance_chart(day_frame,cap,limited),width="stretch",key="main_performance")
         st.caption("Stĺpce = nové vzniky počas hodiny. Čiary = pick v hodine začínajúcej na osi. "
                    "Vznik v priebehu hodiny je konzervatívne dostupný od nasledujúcej celej hodiny. "
-                   "Dnešný profil je simulácia cieľového objemu, nie pôvodné namerané počty.")
+                   "Modrá je simulácia pri pôvodnej kapacite skladu, nie historický pick konkrétnej svozovej kohorty.")
         over_current = day_frame.current_pick > cap + 1e-4
         over_balanced = day_frame.balanced_required > cap + 1e-4
         cols = st.columns(3)
