@@ -7,9 +7,9 @@ import streamlit as st
 
 from src.config import ALLOWED_JOB_TYPES, ZONE
 from src.data_processing import collection_distribution, event_timeline, operational_window, prepare_data
-from src.dashboard import analyze, rescale
+from src.dashboard import analyze, rescale, comparison_table
 from src.demo_data import demo_data
-from src.plots import arrivals_chart, collection_chart, performance_chart, inventory_chart, lines
+from src.plots import arrivals_chart, collection_chart, performance_chart, comparison_charts, lines
 from src.snapshot import load_snapshot, manifest
 from src.utils import csv_bytes
 
@@ -115,40 +115,64 @@ st.caption(f"Scenár bez predpickovania · O 06:00 čaká všetkých {fmt(report
 view = st.radio("Pohľad",["Výkon a plán","Buffer a vznik","Svozy","Dáta a export"],horizontal=True,label_visibility="collapsed")
 
 if view in ["Výkon a plán","Buffer a vznik"]:
-    st.subheader("Vzniky a pickovanie v rovnakom scenári")
-    st.caption("Modrá zachováva hodinový profil nameraného výkonu skladu, prepočítaný na cieľový objem. "
-               "Zelená vyrovnáva výkon pri rešpektovaní vzniku a splniteľných svozových termínov. Obe začínajú s rovnakým plným buffrom.")
-    if limited:
-        st.info("Krivky dodržiavajú limit skladu. Nevyužitá kapacita sa neprenáša do ďalšej hodiny; nevypickovaná práca zostáva v buffri.")
-    else:
-        st.caption("Krivky ukazujú potrebný pick bez obmedzenia kapacity. Oranžová je limit skladu. Pre reálny dopad limitu zapni jeho uplatnenie vľavo.")
-    st.plotly_chart(performance_chart(day_frame,cap,limited),width="stretch",key="main_performance")
-    st.caption("Stĺpce = nové vzniky počas hodiny. Čiary = pick v hodine začínajúcej na osi. "
-               "Vznik v priebehu hodiny je konzervatívne dostupný od nasledujúcej celej hodiny. "
-               "Dnešný profil je simulácia cieľového objemu, nie pôvodné namerané počty.")
-    over_current = day_frame.current_pick > cap + 1e-4
-    over_balanced = day_frame.balanced_required > cap + 1e-4
+    if view == "Výkon a plán":
+        st.subheader("Vzniky a pickovanie v rovnakom scenári")
+        st.caption("Modrá zachováva hodinový profil nameraného výkonu skladu, prepočítaný na cieľový objem. "
+                   "Zelená vyrovnáva výkon pri rešpektovaní vzniku a splniteľných svozových termínov. Obe začínajú s rovnakým plným buffrom.")
+        if limited:
+            st.info("Krivky dodržiavajú limit skladu. Nevyužitá kapacita sa neprenáša do ďalšej hodiny; nevypickovaná práca zostáva v buffri.")
+        else:
+            st.caption("Krivky ukazujú potrebný pick bez obmedzenia kapacity. Oranžová je limit skladu. Pre reálny dopad limitu zapni jeho uplatnenie vľavo.")
+        st.plotly_chart(performance_chart(day_frame,cap,limited),width="stretch",key="main_performance")
+        st.caption("Stĺpce = nové vzniky počas hodiny. Čiary = pick v hodine začínajúcej na osi. "
+                   "Vznik v priebehu hodiny je konzervatívne dostupný od nasledujúcej celej hodiny. "
+                   "Dnešný profil je simulácia cieľového objemu, nie pôvodné namerané počty.")
+        over_current = day_frame.current_pick > cap + 1e-4
+        over_balanced = day_frame.balanced_required > cap + 1e-4
+        cols = st.columns(3)
+        cols[0].metric("Nad limitom · dnešný profil",f"{int(over_current.sum())} h")
+        cols[1].metric("Nad limitom · vyrovnaný pick",f"{int(over_balanced.sum())} h")
+        cols[2].metric("Nesplnené v termíne pri limite",fmt(report.unmet))
+        st.caption(f"Potrebná vyrovnaná špička bez limitu: {fmt(day_frame.balanced_required.max())} jl/h. "
+                   f"{fmt(report.structural_unmet*factor)} joblines nemá časový priestor od 06:00 po deadline ani bez limitu. "
+                   "Aj túto oneskorenú prácu naďalej pickujeme; nezmizne z bufferu.")
+        if report.unmet > max(1e-4,target*1e-9):
+            st.warning(f"{fmt(report.unmet)} cieľových joblines sa pri limite {fmt(cap)} jl/h nedá naplánovať do termínu. "
+                       "Objem zostáva v bilancii; historické predpickovanie ho neznižuje.")
+    st.subheader("Presné porovnanie: vzniky, pick a buffer")
+    st.caption("Aktuálny výkon bez úprav = pôvodné namerané jl/h skladu bez škálovania a bez nového limitu. "
+               "Používame ho ako kapacitu pre zvolenú kohortu; pri nedostatku dostupnej práce sa pick zastaví. "
+               "Ide o simuláciu pri pôvodnom výkone, nie historické pickovanie tejto kohorty.")
+    st.caption("Vyrovnaný pick: " + (f"s limitom {fmt(cap)} jl/h." if limited else "bez obmedzenia kapacity.") +
+               " Oba varianty začínajú s rovnakým plným buffrom a nulovým pickom. "
+               + ("Horný hodinový graf používa dnešný profil prepočítaný na cieľ; toto porovnanie ponecháva pôvodný výkon."
+                  if view=="Výkon a plán" else ""))
+    comparison = comparison_table(report,limited)
+    selected_time = st.select_slider("Stav k času",options=comparison.time.tolist(),
+                                     value=comparison.time.iloc[-1],format_func=lambda t:t.strftime("%d.%m. %H:%M"),
+                                     key=f"comparison_time_{day}")
+    selected = comparison.loc[comparison.time==selected_time].iloc[0]
+    cumulative_plot,buffer_plot = comparison_charts(comparison,selected_time)
     cols = st.columns(3)
-    cols[0].metric("Nad limitom · dnešný profil",f"{int(over_current.sum())} h")
-    cols[1].metric("Nad limitom · vyrovnaný pick",f"{int(over_balanced.sum())} h")
-    cols[2].metric("Nesplnené v termíne pri limite",fmt(report.unmet))
-    st.caption(f"Potrebná vyrovnaná špička bez limitu: {fmt(day_frame.balanced_required.max())} jl/h. "
-               f"{fmt(report.structural_unmet*factor)} joblines nemá časový priestor od 06:00 po deadline ani bez limitu. "
-               "Aj túto oneskorenú prácu naďalej pickujeme; nezmizne z bufferu.")
-    if report.unmet > max(1e-4,target*1e-9):
-        st.warning(f"{fmt(report.unmet)} cieľových joblines sa pri limite {fmt(cap)} jl/h nedá naplánovať do termínu. "
-                   "Objem zostáva v bilancii; historické predpickovanie ho neznižuje.")
-    st.subheader("Buffer: koľko máme stále čo pickovať")
-    st.plotly_chart(inventory_chart(day_frame,report.initial_buffer*factor,limited),width="stretch",key="buffer")
-    current_end = day_frame["current_limited_backlog" if limited else "current_backlog"].iloc[-1]
-    balanced_end = day_frame["scenario_backlog" if limited else "balanced_required_backlog"].iloc[-1]
-    st.caption(f"Buffer na konci dňa · dnešný profil: {fmt(current_end)} · vyrovnaný pick: {fmt(balanced_end)} joblines.")
-    st.caption("Buffer na hranici hodiny = počiatočné vzniky + nové vzniky − pick od 06:00. "
-               "Nula znamená vyčerpanú dostupnú prácu; pick nesmie predbehnúť jej vznik.")
-    st.subheader("Kontrola: vypickované nikdy neprekročí vzniknuté")
-    st.plotly_chart(inventory_chart(day_frame,report.initial_buffer*factor,limited,True),width="stretch",key="cumulative")
-    st.caption("Všetky tri krivky majú rovnaký výber joblines a rovnaký cieľový objem. "
-               "Kumulatívny pick začína nulou, vzniky začínajú plným vstupným buffrom.")
+    for col,label,column in zip(cols,["Vzniknuté joblines","Vypickované · vyrovnaný pick","Vypickované · aktuálny výkon"],
+                                ["created","picked_balanced","picked_current"]):
+        col.metric(label,fmt(selected[column]))
+    st.caption("1. Vzniknuté a vypickované joblines celkom do zvoleného času · biela zvislá čiara označuje vybraný čas.")
+    st.plotly_chart(cumulative_plot,width="stretch",key="comparison_cumulative")
+    cols = st.columns(2)
+    cols[0].metric("Buffer · vyrovnaný pick",fmt(selected.buffer_balanced))
+    cols[1].metric("Buffer · aktuálny výkon",fmt(selected.buffer_current))
+    st.caption("2. Buffer = všetky dovtedy vzniknuté joblines − vypickované joblines daného variantu. "
+               "Ukazuje prácu, ktorú ešte môžeme pickovať; nevzniknuté joblines nie sú dostupné.")
+    st.plotly_chart(buffer_plot,width="stretch",key="comparison_buffer")
+    readable = comparison.rename(columns={"time":"Čas","created":"Vzniknuté joblines",
+        "picked_balanced":"Vypickované · vyrovnaný pick","picked_current":"Vypickované · aktuálny výkon bez úprav",
+        "buffer_balanced":"Buffer · vyrovnaný pick","buffer_current":"Buffer · aktuálny výkon bez úprav"})
+    with st.expander("Presné hodnoty po hodinách"):
+        st.dataframe(readable,hide_index=True,column_config={column:st.column_config.NumberColumn(format="%.2f")
+                                                           for column in readable if column!="Čas"})
+        st.download_button("Porovnanie vznikov, pickov a bufferu CSV",csv_bytes(readable),
+                           "sklc3_comparison.csv","text/csv")
     with st.expander("Kde presne prekračujeme limit a kde je nulový pick"):
         detail = day_frame[["hour","created_scaled","current_pick","balanced_required"]].copy()
         detail["nad_limitom_dnes"] = (detail.current_pick-cap).clip(lower=0)
@@ -163,7 +187,8 @@ if view in ["Výkon a plán","Buffer a vznik"]:
         st.caption("Referenčné hodnoty sa s cieľom nemenia a neznižujú scenárový buffer. "
                    "Denný profil nie je dôkazom dodržania konkrétneho svozu; vyrovnaný plán kontroluje termíny každej časovej skupiny.")
     if view == "Buffer a vznik":
-        st.plotly_chart(arrivals_chart(day_frame,report.initial_buffer,factor),width="stretch")
+        with st.expander("Vstupný buffer a jednotlivé hodinové vzniky"):
+            st.plotly_chart(arrivals_chart(day_frame,report.initial_buffer,factor),width="stretch")
 
 elif view == "Svozy":
     st.subheader("Čo musí byť pripravené na svozy")

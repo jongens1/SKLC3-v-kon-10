@@ -1,6 +1,6 @@
 # Overenie offline dashboardu
 
-Overené 20. 10. 2026, Python 3.12. Posledný úplný beh: **45 testov prešlo**.
+Overené 20. 10. 2026, Python 3.12. Posledný úplný beh: **48 testov prešlo**.
 Overuje sa aj spustenie Streamlit AppTest so zablokovaným sieťovým pripojením.
 
 ## Reálne dátové kontroly
@@ -39,6 +39,14 @@ Streamlit AppTest prešiel všetky štyri pohľady, prepočet na 250 000, zachov
 skutočného výkonu pri zmene cieľa, explicitný demo režim, limit a exporty.
 Hlavný pohľad obsahuje vzniky, dnešný profil a vyrovnaný pick, oranžový limit,
 oba buffre a kumulatívnu kontrolu. Prepínač limitu mení pick aj buffer spoločne.
+
+Presné porovnanie v pohľade Buffer a vznik používa pôvodný nameraný výkon skladu
+bez škálovania ako kapacitu pre kohortu. Pri cieli 250 000 vykoná 114 649 pickov
+a zostane buffer 135 349. Nový limit tento referenčný variant nemení; vyrovnaný
+variant rešpektuje prepínač limitu. Nové regresie overujú bilancie oboch variantov
+pri cieľoch 0, 121 290 a 250 000, pôvodnú kapacitu, zhodu piatich grafových radov
+s tabuľkou a počiatočné/koncové časové hranice. AppTest overuje zmenu posuvníka
+na 06:00 vrátane presných číselných kariet a nulového kumulatívneho picku.
 
 Aplikácia neimportuje BigQuery klienta, nečíta Google credentials a pri používaní
 nevolá query. Konektor a konfigurácia zostávajú iba pre offline prípravu snapshotov.

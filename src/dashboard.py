@@ -74,6 +74,26 @@ def _profile_pick(available: np.ndarray, requested: np.ndarray) -> np.ndarray:
     return picked
 
 
+def comparison_table(report: Dashboard, limited: bool = False) -> pd.DataFrame:
+    """Boundary balances against original measured capacity, never normalized to target.
+
+    Measured warehouse throughput is used as capacity for this cohort, not claimed
+    as observed picking of the cohort. Historical prepicking remains irrelevant.
+    """
+    day = report.day
+    current = _profile_pick(day.available_scaled.to_numpy(),day.warehouse_picked.to_numpy())
+    balanced = day["prepick_smoothed_scaled" if limited else "balanced_required"].to_numpy()
+    initial = report.initial_buffer*report.factor
+    created = np.r_[initial,day.cumulative_created_scaled.to_numpy()]
+    current_total = np.r_[0.0,current.cumsum()]
+    balanced_total = np.r_[0.0,balanced.cumsum()]
+    return pd.DataFrame(dict(
+        time=[day.hour.iloc[0]]+(day.hour+pd.Timedelta(hours=1)).tolist(),
+        created=created,picked_balanced=balanced_total,picked_current=current_total,
+        buffer_balanced=np.maximum(0,created-balanced_total),
+        buffer_current=np.maximum(0,created-current_total)))
+
+
 def _scenario_columns(day: pd.DataFrame, factor: float, simulation: Simulation,
                       required: Simulation, cap: float | None) -> pd.DataFrame:
     day = apply_scaling(day, factor)

@@ -58,6 +58,25 @@ def inventory_chart(day: pd.DataFrame, initial: float, limited: bool = False,
     return figure
 
 
+def comparison_charts(frame: pd.DataFrame, selected: pd.Timestamp) -> tuple[go.Figure,go.Figure]:
+    """Two views of exactly the same boundary balances and selected timestamp."""
+    totals, buffers = base(y="Joblines celkom"), base(y="Joblines na pickovanie")
+    for figure,series in [(totals,[("created","Vzniknuté joblines",PALE),
+                                 ("picked_balanced","Vypickované · vyrovnaný pick",GREEN),
+                                 ("picked_current","Vypickované · aktuálny výkon bez úprav",BLUE)]),
+                           (buffers,[("buffer_balanced","Buffer · vyrovnaný pick",GREEN),
+                                     ("buffer_current","Buffer · aktuálny výkon bez úprav",BLUE)])]:
+        for column,label,color in series:
+            figure.add_trace(go.Scatter(x=frame.time,y=frame[column],name=label,mode="lines+markers",
+                                        marker=dict(size=5),line=dict(color=color,width=3),
+                                        hovertemplate="%{y:,.0f} jl<extra>%{fullData.name}</extra>"))
+        figure.add_vline(x=selected,line_color="#ffffff",line_width=1,line_dash="dot")
+        figure.update_layout(legend=dict(orientation="h",y=1.2,x=0),
+                             margin=dict(l=10,r=20,t=75,b=10),height=440,
+                             xaxis=dict(tickformat="%H:%M",hoverformat="%d.%m. %H:%M"))
+    return totals,buffers
+
+
 def lines(frame: pd.DataFrame, columns: list[str], labels: list[str], title: str = "") -> go.Figure:
     figure = base(title,y="Joblines")
     for column,label,color in zip(columns,labels,[BLUE,GREEN,PALE,"#7cc7ff"]):

@@ -24,7 +24,8 @@ DEMO je samostatná explicitná voľba. Nepoužíva sa tichý prechod na demo.
 - **Výkon a plán:** stĺpce sú nové vzniky, modrá je simulovaný pick podľa dnešného
   hodinového profilu, zelená vyrovnaný pick. Oba scenáre majú rovnaký cieľový objem.
 - **Buffer a vznik:** oba priebehy bufferu a kumulatívna kontrola vznikov/pickov
-  sú viditeľné aj na hlavnom pohľade; tu je navyše jeden stĺpec vstupného bufferu.
+  s presnými hodnotami pre vybraný čas sú tu hneď hore. Porovnanie je dostupné
+  aj na hlavnom pohľade; rozbaliteľný detail obsahuje jeden stĺpec vstupného bufferu.
 - **Svozy:** hodinové cutoffy a skutočné podiely Expedícia Standard / LC / POB.
 - **Dáta a export:** technické údaje, kvalita, pôvod dát a CSV sú schované tu.
 
@@ -71,6 +72,25 @@ Modrá hlavná krivka je **scenár**, nie nameraná história:
 Vykonaný pick sa obmedzí dostupnou prácou; nevyužitá kapacita sa neprenáša.
 Nevypickované joblines zostávajú v rade. Pri zapnutí limitu sa každá hodina
 navyše obmedzí jeho hodnotou. Bez nameraného profilu sa použije rovnomerný profil.
+
+### Presné porovnanie vznikov, pickov a bufferu
+
+Dva grafy majú spoločný posuvník **Stav k času**, číselné karty a hodinovú tabuľku
+s CSV exportom. Prvý ukazuje všetky dovtedy vzniknuté joblines a kumulatívny pick
+oboch variantov, druhý zostávajúci buffer každého variantu. Počiatočné vzniky sú
+už v prvom bode o 06:00; oba pickové rady začínajú nulou. Časy označujú stav na
+hranici hodiny, nie začiatok hodinového výkonu. Vybraný čas je biela zvislá čiara.
+
+**Aktuálny výkon bez úprav** v tomto porovnaní používa pôvodné namerané jl/h
+celého skladu ako dostupnú kapacitu pre vybranú kohortu. Neškáluje sa na cieľ
+a nemení ho nový limit skladu. Skutočný simulovaný pick sa zastaví pri nedostatku
+vzniknutej a dostupnej práce. Nejde o tvrdenie, že sklad historicky pickoval iba
+túto kohortu. Vyrovnaný variant rešpektuje prepínač uplatnenia limitu.
+
+Tento rad je zámerne odlišný od horného hodinového grafu, ktorý porovnáva
+dnešný profil prepočítaný na rovnaký cieľový objem. Napríklad pri cieli 250 000
+je v novom porovnaní pôvodný denný výkon 114 649 a koncový buffer 135 349 jl;
+všetka dostupná pôvodná kapacita sa v tomto prípade využije.
 
 ### Vstupný buffer
 

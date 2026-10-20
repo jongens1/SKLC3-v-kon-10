@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 import pytest
 from src.config import ALLOWED_JOB_TYPES
-from src.dashboard import analyze,rescale
+from src.dashboard import analyze,rescale,comparison_table
 from src.data_processing import operational_window,prepare_data
 from src.demo_data import demo_data
 from src.snapshot import load_snapshot
-from src.plots import performance_chart,arrivals_chart,inventory_chart
+from src.plots import performance_chart,arrivals_chart,inventory_chart,comparison_charts
 
 
 def real_data():
@@ -133,3 +133,29 @@ def test_late_jobs_stay_in_queue_and_no_arbitrary_empty_hours_remain():
     assert report.simulation.allocations.loc[report.simulation.allocations.group.isin(late),"count"].sum() > 30000
     for row in report.simulation.allocations.itertuples():
         assert row.release <= row.hour <= row.latest
+
+
+@pytest.mark.parametrize("target",[0,121290,250000])
+def test_exact_comparison_keeps_original_capacity_and_balances_both_buffers(target):
+    data,throughput,_,start,end = real_data()
+    report = analyze(data,start,end,target,cap=5000,throughput=throughput)
+    free = comparison_table(report,False)
+    limited = comparison_table(report,True)
+    assert len(limited) == 25
+    assert limited.time.iloc[0] == start
+    assert limited.time.iloc[-1] == end
+    assert limited.created.iloc[0] == pytest.approx(55990*report.factor)
+    assert limited.picked_current.iloc[0] == limited.picked_balanced.iloc[0] == 0
+    assert np.allclose(free.picked_current,limited.picked_current)  # New cap never changes original capacity.
+    assert limited.picked_current.iloc[-1] == pytest.approx(114649 if target else 0)
+    assert limited.picked_balanced.diff().dropna().max() <= 5000+.001
+    for pick,buffer in [("picked_current","buffer_current"),("picked_balanced","buffer_balanced")]:
+        assert np.allclose(limited[buffer],limited.created-limited[pick],atol=.001)
+        assert (limited[pick] <= limited.created+.001).all()
+        assert (limited[pick].iloc[1:].to_numpy() <= report.day.cumulative_available_scaled+.001).all()
+    totals,buffers = comparison_charts(limited,limited.time.iloc[6])
+    assert len(totals.data) == 3
+    assert len(buffers.data) == 2
+    assert np.allclose(totals.data[2].y,limited.picked_current)
+    assert np.allclose(buffers.data[1].y,limited.buffer_current)
+    assert totals.layout.shapes[0].x0 == limited.time.iloc[6]

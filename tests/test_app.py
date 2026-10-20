@@ -1,5 +1,6 @@
 from pathlib import Path
 import socket
+import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,12 @@ def test_target_changes_without_changing_measured_picks():
     assert next(x for x in test.metric if x.label=="Cieľový objem").value == "250 000"
     assert next(x for x in test.metric if x.label=="Vstupný buffer o 06:00").value == "115 405"
     assert next(x for x in test.metric if x.label=="Skutočne vypickované v dni").value == "114 649"
+    assert next(x for x in test.metric if x.label=="Vypickované · aktuálny výkon").value == "114 649"
+    assert next(x for x in test.metric if x.label=="Buffer · aktuálny výkon").value == "135 349"
+    next(x for x in test.select_slider if x.label=="Stav k času").set_value(pd.Timestamp("2026-10-15T06:00:00+02:00")).run()
+    assert not test.exception
+    assert next(x for x in test.metric if x.label=="Vzniknuté joblines").value == "115 405"
+    assert next(x for x in test.metric if x.label=="Vypickované · aktuálny výkon").value == "0"
 
 
 def test_all_four_views_and_exports():
