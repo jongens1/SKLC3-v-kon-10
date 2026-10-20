@@ -21,16 +21,15 @@ DEMO je samostatná explicitná voľba. Nepoužíva sa tichý prechod na demo.
 
 ## Čo vidíš
 
-- **Výkon a plán:** modrá je skutočne vypickovaný objem celého skladu po hodinách;
-  zelená je vyrovnaný plán pre cieľový objem vybraných svozov.
-- **Buffer a vznik:** staršia nevypickovaná práca je jeden vstupný buffer o 06:00,
-  potom nasledujú vzniky a buffer počas logistického dňa.
+- **Výkon a plán:** stĺpce sú nové vzniky, modrá je simulovaný pick podľa dnešného
+  hodinového profilu, zelená vyrovnaný pick. Oba scenáre majú rovnaký cieľový objem.
+- **Buffer a vznik:** oba priebehy bufferu a kumulatívna kontrola vznikov/pickov
+  sú viditeľné aj na hlavnom pohľade; tu je navyše jeden stĺpec vstupného bufferu.
 - **Svozy:** hodinové cutoffy a skutočné podiely Expedícia Standard / LC / POB.
 - **Dáta a export:** technické údaje, kvalita, pôvod dát a CSV sú schované tu.
 
-Hlavný graf ukazuje iba skutočný výkon a potrebný plán. Rozbaliteľné detaily
-ukazujú výkon pre konkrétne svozy, historický profil prepočítaný koeficientom
-a splatný objem pred cutoffmi. Čiary spájajú skutočné hodinové hodnoty; nepoužíva
+Hlavný graf ukazuje vzniky, dva scenáre a oranžový limit skladu. Rozbaliteľné detaily
+ukazujú nameranú históriu a hodinové prekročenia limitu. Čiary spájajú hodinové hodnoty; nepoužíva
 sa spline s vymyslenými špičkami ani zmenou počtov. Os výkonu začína na nule.
 
 ## Reálne dáta pre 15. 10. 2026
@@ -57,22 +56,32 @@ Native mapovanie z číselníkov LookupLists:
 Balíkové sledovacie záznamy a príjem sú vylúčené. Storná sa vykazujú, ale bez
 obchodného pravidla sa automaticky neodstraňujú.
 
-### Dva rozdielne pohľady na pickovanie
+### Nameraná referencia a simulácia podľa dnešného profilu
 
 **Skutočný výkon skladu** je všetkých **114 649** povolených joblines picknutých
 počas logistického dňa, aj keď patria do iných svozových dní. Jeho špička je
 **16. 10. 01:00–02:00, 10 079 jl/h**. Tento rad sa nemení pri zmene cieľa.
 
 **Pickovanie pre vybrané svozy** má v tomto dni **75 837** joblines. Ide o časť
-celkového výkonu, nie o celý výkon skladu. Je dostupné ako doplnková čiara.
+celkového výkonu, nie o celý výkon skladu. Je dostupné v rozbalenej referencii.
 Rozdiel nie je chyba sumy: rady majú rôzny dátový výber.
+
+Modrá hlavná krivka je **scenár**, nie nameraná história:
+`požadovaný pick[h] = cieľ × nameraný výkon[h] / súčet nameraného výkonu dňa`.
+Vykonaný pick sa obmedzí dostupnou prácou; nevyužitá kapacita sa neprenáša.
+Nevypickované joblines zostávajú v rade. Pri zapnutí limitu sa každá hodina
+navyše obmedzí jeho hodnotou. Bez nameraného profilu sa použije rovnomerný profil.
 
 ### Vstupný buffer
 
-Pred 15. 10. 06:00 vzniklo 55 990 joblines tejto kohorty. Už picknutých bolo
-44 421, preto otvorený vstupný buffer je **11 569**. Historicky dokončená práca sa
-nepočíta ako ďalšia čakajúca práca. Úplná staršia história je dostupná v detaile,
-na hlavnej osi sa zoskupí do jednej hodnoty.
+Pred 15. 10. 06:00 vzniklo **55 990** joblines tejto kohorty. Scenár predpokladá,
+že sa **nič nepredpickovalo**: celý tento objem je vstupný buffer. Historicky
+picknutých 44 421 sa neodpočítava. Pri cieli 250 000 je vstupný buffer 115 405.
+Oba scenáre začínajú o 06:00 s nulovým kumulatívnym pickom.
+
+`buffer = vstupný buffer + nové vzniky od 06:00 − vykonaný pick od 06:00`.
+V kumulatívnom grafe je explicitný počiatočný bod aj koniec o 06:00 nasledujúci deň.
+Vykonaný pick nikdy neprekročí kumulatívne dostupné joblines.
 
 ## Cieľový objem a plánovanie
 
@@ -80,26 +89,37 @@ na hlavnej osi sa zoskupí do jednej hodnoty.
 koeficient = cieľový objem / objem svozovej kohorty
 prepočítaný počet = pôvodný počet × koeficient
 pick deadline = cutoff − bezpečnostný predstih
-začiatok plánovania = začiatok dňa − lookback
+začiatok plánovania = začiatok dňa o 06:00
 ```
 
-Defaultný lookback je 24 h, rozsah 0–168 h. Práca už historicky dokončená pred
-začiatkom plánovacieho okna sa znovu neplánuje. Zostávajúca staršia práca je
-dostupná od začiatku okna. Model nikdy neplánuje pred vznikom ani po deadline.
+Plánovanie má presne jeden logistický deň. Všetka staršia vzniknutá práca je
+dostupná od začiatku dňa bez ohľadu na historický pick. Model neplánuje pred
+dostupnosťou. Splniteľné termíny sa dodržiavajú. Práca, ktorá už od 06:00 nemá
+žiadny platný slot pred termínom, sa ponechá na pickovanie do konca dňa a
+vykáže sa ako oneskorená. Zmeškaný svoz nesmie vymazať fyzický buffer.
 
 Využívajú sa celé hodinové sloty: vznik 06:10 umožní prvý slot 07:00–08:00.
 Cutoff 14:30 a predstih 1 h znamená deadline 13:30, posledný celý slot 12–13.
-To je konzervatívne. Objem s deadline pred vznikom alebo bez celého slotu zostáva
-explicitne nenaplánovateľný, nestráca sa z bilancie.
+To je konzervatívne. Objem s deadline pred vznikom alebo bez celého slotu je
+explicitne nesplniteľný v termíne, ale zostáva v rade na pickovanie. Jeden reálny
+jobline vzniká až mimo sledovaného dňa; v tom dni ho nemožno pickovať.
 
-Maximálny tok a bisekcia minimalizujú spoločnú špičku výkonu. Voliteľný limit
-platí pre celý sklad naraz. Cieľový objem bez limitu sa prepočíta okamžite zo
-základného plánu; nemusí sa opakovať optimalizácia ani čítanie dát.
-Pri zadanom limite sa kontroluje maximálny realizovateľný objem a zvyšok.
+Maximálny tok a bisekcia minimalizujú spoločnú špičku výkonu. Následné vyrovnanie
+minimalizuje súčet štvorcov hodinového zaťaženia pri zachovaní prideleného objemu
+každej skupiny a jej dostupných slotov. Odstraňuje ľubovoľné prázdne sloty
+rovnocenných riešení toku. Pri limite sa najprv maximalizuje realizovateľný objem.
+Pri cieli 250 000 vychádza potrebný rovnomerný výkon približne **10 417 jl/h**.
 
-Historické počty, backlog, svozy, potrebný a simulovaný výkon majú prepočítané
-stĺpce v exportoch. **Nameraná modrá čiara skladu zostáva skutočnosťou.** Scaled
-historická čiara je v detaile samostatne označená.
+**Limit skladu** je viditeľný vľavo. Predvolene je referenčnou čiarou, aby bolo
+vidieť, kde ho potrebné výkony prekračujú. Voľba **Uplatniť limit v krivkách**
+prepne oba pickové priebehy aj oba buffre na realizovateľný variant pri tomto
+limite. Počty hodín nad limitom vždy vychádzajú z potrieb bez limitu. Metrika
+nesplnených termínov je odlišná od zostávajúceho bufferu: oneskorená práca môže
+byť ešte v daný deň vypickovaná. Audit označuje tieto pridelenia `on_time=False`.
+
+Hodinový export obsahuje oba scenáre bez limitu aj s limitom, kumulatívne
+vzniky, pick a buffre. Namerané stĺpce sú iba auditná referencia a nemenia
+scenárový vstupný buffer.
 
 ## Obsah snapshotu
 

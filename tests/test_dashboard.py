@@ -7,7 +7,7 @@ from src.dashboard import analyze,rescale
 from src.data_processing import operational_window,prepare_data
 from src.demo_data import demo_data
 from src.snapshot import load_snapshot
-from src.plots import performance_chart,arrivals_chart
+from src.plots import performance_chart,arrivals_chart,inventory_chart
 
 
 def real_data():
@@ -35,22 +35,24 @@ def test_actual_throughput_and_night_peak_are_measured_separately():
     assert peak.warehouse_picked == 10079
 
 
-def test_initial_buffer_subtracts_already_picked_and_is_one_bucket():
+def test_initial_buffer_ignores_historical_picks_and_is_one_bucket():
     data,throughput,_,start,end = real_data()
     report = analyze(data,start,end,121290,throughput=throughput)
     assert report.created_before_day == 55990
     assert report.picked_before_day == 44421
-    assert report.initial_buffer == 11569
+    assert report.initial_buffer == 55990
     chart = arrivals_chart(report.day,report.initial_buffer,1)
     assert chart.data[0].x[0] == "Vstupný buffer"
-    assert chart.data[0].y[0] == 11569
+    assert chart.data[0].y[0] == 55990
     assert len(chart.data[0].x) == 25
 
 
-def test_completed_work_is_not_scheduled_again_and_scale_conserves_volume():
+def test_every_created_job_is_planned_again_and_scale_conserves_volume():
     data,throughput,_,start,end = real_data()
     report = analyze(data,start,end,250000,throughput=throughput)
-    assert report.simulation.scheduled + report.unmet + report.completed_before_planning*report.factor == pytest.approx(250000,abs=.001)
+    unavailable = report.total_volume*report.factor-report.simulation.scheduled-report.simulation.unscheduled
+    assert unavailable == pytest.approx(report.factor,abs=.001)  # One job arrives outside the day.
+    assert report.completed_before_planning == 0
     assert report.factor == pytest.approx(250000/121290)
     assert np.allclose(report.day.created_scaled,report.day.created_count*report.factor)
     assert np.allclose(report.day.picked_scaled,report.day.picked_count*report.factor)
@@ -58,14 +60,15 @@ def test_completed_work_is_not_scheduled_again_and_scale_conserves_volume():
     assert report.day.scenario_backlog.min() >= -.001
 
 
-def test_comparison_uses_actual_unscaled_and_true_planned_curve():
+def test_comparison_uses_same_target_and_availability_for_both_scenarios():
     data,throughput,_,start,end = real_data()
     a = analyze(data,start,end,121290,throughput=throughput)
     b = analyze(data,start,end,250000,throughput=throughput)
     fig = performance_chart(b.day)
-    assert fig.data[0].name == "Skutočný výkon skladu"
-    assert np.allclose(fig.data[0].y,a.day.warehouse_picked)
-    assert np.allclose(fig.data[1].y,b.day.prepick_smoothed_scaled)
+    assert fig.data[0].name == "Nové vzniky"
+    assert np.allclose(fig.data[1].y,b.day.current_pick)
+    assert np.allclose(fig.data[2].y,b.day.balanced_required)
+    assert np.allclose(b.day.current_requested, a.day.current_requested*b.factor)
     assert fig.layout.yaxis.rangemode == "tozero"
 
 
@@ -84,4 +87,49 @@ def test_instant_rescale_matches_fresh_target_and_keeps_measured_performance():
     for column in ["prepick_smoothed_scaled","cumulative_required_scaled","scenario_backlog","backlog_scaled"]:
         assert np.allclose(quick.day[column],fresh.day[column],atol=.001)
     assert np.allclose(quick.day.warehouse_picked,base.day.warehouse_picked)
-    assert quick.simulation.scheduled+quick.unmet+quick.completed_before_planning*quick.factor == pytest.approx(250000,abs=.001)
+    assert quick.unmet == pytest.approx(fresh.unmet)
+
+
+@pytest.mark.parametrize("target,cap",[(250000,None),(250000,5000),(0,0),(121290,0)])
+def test_both_scenarios_never_exceed_created_or_available_and_buffer_balances(target,cap):
+    data,throughput,_,start,end = real_data()
+    report = analyze(data,start,end,target,cap=cap,throughput=throughput)
+    frame = report.day
+    for pick,backlog in [("current_pick","current_backlog"),("current_limited","current_limited_backlog"),
+                         ("balanced_required","balanced_required_backlog"),("prepick_smoothed_scaled","scenario_backlog")]:
+        assert (frame[pick].cumsum() <= frame.cumulative_available_scaled+.001).all()
+        assert (frame[pick].cumsum() <= frame.cumulative_created_scaled+.001).all()
+        assert np.allclose(frame[backlog],frame.cumulative_created_scaled-frame[pick].cumsum())
+        assert frame[backlog].min() >= -.001
+    if cap is not None:
+        assert frame.current_limited.max() <= cap+.001
+        assert frame.prepick_smoothed_scaled.max() <= cap+.001
+    chart = inventory_chart(frame,report.initial_buffer*report.factor,cumulative=True)
+    assert chart.data[0].y[0] == pytest.approx(report.initial_buffer*report.factor)
+    assert chart.data[1].y[0] == chart.data[2].y[0] == 0
+    assert chart.data[0].x[0] == start
+    assert chart.data[0].x[-1] == end
+
+
+def test_historical_prepicking_cannot_change_either_scenario():
+    data,throughput,_,start,end = real_data()
+    before = analyze(data,start,end,121290,throughput=throughput)
+    changed = data.copy()
+    changed["picked_at"] = data.picked_at.mask(pd.Series(True,index=data.index))
+    after = analyze(changed,start,end,121290,throughput=throughput)
+    for col in ["current_pick","balanced_required","current_backlog","balanced_required_backlog"]:
+        assert np.allclose(before.day[col],after.day[col])
+    assert before.initial_buffer == after.initial_buffer == 55990
+
+
+def test_late_jobs_stay_in_queue_and_no_arbitrary_empty_hours_remain():
+    data,throughput,_,start,end = real_data()
+    report = analyze(data,start,end,121290,throughput=throughput)
+    assert report.structural_unmet > 30000  # No credit for historical prepicking.
+    assert report.day.balanced_required.min() > 5000
+    assert report.day.balanced_required.max()-report.day.balanced_required.min() < .01
+    assert report.day.balanced_required_backlog.iloc[-1] == pytest.approx(0,abs=.001)
+    late = report.plan.groups.index[~report.plan.groups.on_time]
+    assert report.simulation.allocations.loc[report.simulation.allocations.group.isin(late),"count"].sum() > 30000
+    for row in report.simulation.allocations.itertuples():
+        assert row.release <= row.hour <= row.latest

@@ -61,6 +61,25 @@ def test_minimax_known_optimum_and_shared_cap():
     assert not limited.feasible
 
 
+def test_secondary_balancing_fills_arbitrary_flow_gaps_without_changing_peak():
+    groups = pd.DataFrame([dict(release=0,latest=0,count=4),dict(release=0,latest=3,count=4)])
+    result = simulate(groups,4)
+    assert np.allclose(result.hourly,[4,4/3,4/3,4/3],atol=1e-5)
+    assert result.peak == pytest.approx(4,abs=1e-5)
+    assert np.allclose(result.allocations.groupby("group")["count"].sum(),[4,4])
+
+
+def test_late_work_cannot_displace_deadline_eligible_work_under_cap():
+    groups = pd.DataFrame([dict(release=0,latest=1,count=2,on_time=False),
+                           dict(release=0,latest=0,count=1,on_time=True),
+                           dict(release=0,latest=1,count=1,on_time=True)])
+    result = simulate(groups,2,max_per_hour=1)
+    by_group = result.allocations.groupby("group")["count"].sum()
+    assert by_group.get(0,0) == pytest.approx(0,abs=1e-5)
+    assert by_group.get(1,0) == pytest.approx(1,abs=1e-5)
+    assert by_group.get(2,0) == pytest.approx(1,abs=1e-5)
+
+
 def test_lookback_makes_early_cutoff_feasible_without_per_job_limit():
     start, end = operational_window(date(2026, 10, 15))
     data, _, _ = prepare_data(pd.DataFrame([row(collection_at=start, created_at=start - pd.Timedelta(days=3))]), start, end)

@@ -93,8 +93,12 @@ def simulate(groups: pd.DataFrame, n_hours: int,
         sink = source + 1
         flow = _Flow(sink + 1)
         refs = []
+        deferred = []
         for i, row in enumerate(groups.itertuples()):
-            flow.add(source, i, counts[i])
+            if hasattr(row,"on_time") and not row.on_time:
+                deferred.append((flow.add(source,i,0.0),counts[i]))
+            else:
+                flow.add(source, i, counts[i])
             earliest = int(row.release)
             if earliest < 0 or row.latest >= n_hours or earliest > row.latest:
                 raise ValueError("Skupina nemá platný hodinový interval.")
@@ -104,6 +108,12 @@ def simulate(groups: pd.DataFrame, n_hours: int,
         for hour in range(n_hours):
             flow.add(len(groups) + hour, sink, peak)
         scheduled = flow.maximum(source, sink)
+        # Secure as much deadline-eligible work as possible before filling spare
+        # capacity with already-late jobs. Never trade an on-time job for a late one.
+        for edge,count in deferred:
+            edge[2] += count
+        if deferred:
+            scheduled += flow.maximum(source,sink)
         if not details:
             return scheduled
         rows = [dict(group=i, release=release, latest=latest, earliest=earliest,
@@ -121,6 +131,36 @@ def simulate(groups: pd.DataFrame, n_hours: int,
         else:
             lo = middle
     scheduled, allocation = run(min(upper, hi + tolerance), True)
+    # A maximum flow minimizes the peak but can leave arbitrary empty slots.
+    # Coordinate water filling minimizes sum(hourly_load**2) within that peak,
+    # keeping every group's volume and its release/deadline interval intact.
+    if len(allocation):
+        matrix = np.zeros((len(groups), n_hours))
+        np.add.at(matrix, (allocation.group.to_numpy(dtype=int), allocation.hour.to_numpy(dtype=int)),
+                  allocation["count"].to_numpy())
+        loads = matrix.sum(axis=0)
+        for _ in range(1000):
+            previous = loads.copy()
+            for i, row in enumerate(groups.itertuples()):
+                first, last = int(row.release), int(row.latest) + 1
+                volume = matrix[i].sum()
+                if not volume:
+                    continue
+                other = np.maximum(0, loads[first:last] - matrix[i, first:last])
+                ordered = np.sort(other)
+                levels = (volume + ordered.cumsum()) / np.arange(1, len(ordered) + 1)
+                k = np.flatnonzero(np.r_[levels[:-1] <= ordered[1:], True])[0]
+                replacement = np.maximum(0, levels[k] - other)
+                loads[first:last] = other + replacement
+                matrix[i, first:last] = replacement
+            if np.max(np.abs(loads - previous)) <= max(1e-7, total * 1e-10):
+                break
+        rows = []
+        for i, row in enumerate(groups.itertuples()):
+            for hour in np.flatnonzero(matrix[i] > 1e-8):
+                rows.append(dict(group=i, release=int(row.release), latest=int(row.latest),
+                                 earliest=int(row.release), hour=int(hour), count=matrix[i, hour]))
+        allocation = pd.DataFrame(rows, columns=empty.columns)
     hourly = np.zeros(n_hours)
     if len(allocation):
         np.add.at(hourly, allocation.hour.to_numpy(dtype=int), allocation["count"].to_numpy())
