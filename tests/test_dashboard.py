@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from src.config import ALLOWED_JOB_TYPES
-from src.dashboard import analyze,rescale,comparison_table
+from src.dashboard import analyze,rescale,comparison_table,hourly_output
 from src.data_processing import operational_window,prepare_data
 from src.demo_data import demo_data
 from src.snapshot import load_snapshot
@@ -68,7 +68,8 @@ def test_comparison_uses_same_target_and_availability_for_both_scenarios():
     assert fig.data[0].name == "Nové vzniky"
     assert np.allclose(fig.data[1].y,b.day.current_pick)
     assert np.allclose(fig.data[2].y,b.day.balanced_required)
-    assert np.allclose(b.day.current_requested, a.day.current_requested*b.factor)
+    assert np.allclose(b.day.current_requested, a.day.current_requested)
+    assert b.day.current_pick.sum() == a.day.current_pick.sum() == 114649
     assert fig.layout.yaxis.rangemode == "tozero"
 
 
@@ -159,3 +160,53 @@ def test_exact_comparison_keeps_original_capacity_and_balances_both_buffers(targ
     assert np.allclose(totals.data[2].y,limited.picked_current)
     assert np.allclose(buffers.data[1].y,limited.buffer_current)
     assert totals.layout.shapes[0].x0 == limited.time.iloc[6]
+
+
+def test_audit_270000_15000_reconciles_sources_charts_export_and_deadlines():
+    data,throughput,_,start,end = real_data()
+    report = analyze(data,start,end,270000,cap=15000,throughput=throughput)
+    frame = hourly_output(report,True)
+    balances = comparison_table(report,True)
+    factor = 270000/121290
+    assert report.initial_buffer*factor == pytest.approx(55990*factor)
+    assert frame.created_in_hour.sum() == pytest.approx(65299*factor)
+    assert frame.created_total.iloc[-1] == pytest.approx(121289*factor)
+    assert 270000-frame.created_total.iloc[-1] == pytest.approx(factor)
+    assert frame.balanced_pick.sum() == pytest.approx(121289*factor,abs=.001)
+    assert frame.balanced_pick.max() == pytest.approx(11249.907247,abs=.001)
+    assert (frame.balanced_pick<=15000+.001).all()
+    assert (frame.balanced_pick<=frame.available_before_balanced_pick+.001).all()
+    assert (frame.current_pick<=frame.available_before_current_pick+.001).all()
+    assert frame.current_pick.sum() == 114649
+    assert frame.current_buffer.iloc[-1] == pytest.approx(121289*factor-114649)
+    assert frame.balanced_buffer.iloc[-1] == pytest.approx(0,abs=.001)
+    assert np.allclose(frame.current_pick,report.day.warehouse_picked)
+    for prefix in ["current","balanced"]:
+        assert np.allclose(frame[f"{prefix}_picked_total"],frame[f"{prefix}_pick"].cumsum())
+        assert np.allclose(frame[f"{prefix}_buffer"],frame.created_total-frame[f"{prefix}_picked_total"],atol=.001)
+        assert np.allclose(frame[f"{prefix}_buffer"],balances[f"buffer_{prefix}"].iloc[1:])
+        assert (frame[f"{prefix}_picked_total"] <= report.day.cumulative_available_scaled+.001).all()
+    assert frame.hour_end.iloc[-1] == end
+    assert frame.completed_on_time_with_limit.iloc[-1]+frame.completed_late_with_limit.iloc[-1] == pytest.approx(frame.balanced_pick.sum())
+    assert frame.missed_deadlines_with_limit.iloc[-1] == pytest.approx(report.unmet)
+    assert report.unmet == pytest.approx(36019*factor,abs=.001)
+    assert frame.completed_on_time_with_limit.iloc[-1] == pytest.approx((121290-36019)*factor,abs=.001)
+    # Finishing an already-late job does not make that missed deadline disappear.
+    assert frame.missed_deadlines_with_limit.iloc[-1] > 80000
+    assert (frame.missed_deadlines_with_limit.diff().dropna()>=-.001).all()
+    for row in report.simulation.allocations.itertuples():
+        assert row.release <= row.hour <= row.latest
+    counts = data.groupby("job_type").jobline_count.sum()*factor
+    assert counts.sum() == pytest.approx(270000)
+
+
+def test_lower_limit_reduces_completion_and_preserves_deadline_vs_inventory_distinction():
+    data,throughput,_,start,end = real_data()
+    report = analyze(data,start,end,270000,cap=10000,throughput=throughput)
+    limited = hourly_output(report,True)
+    unlimited = hourly_output(report,False)
+    assert limited.balanced_pick.sum() == pytest.approx(240000,abs=.001)
+    assert limited.balanced_buffer.iloc[-1] == pytest.approx(121289*report.factor-240000,abs=.001)
+    assert unlimited.balanced_pick.sum() > 269997
+    assert limited.missed_deadlines_with_limit.iloc[-1] == pytest.approx(report.unmet)
+    assert limited.missed_deadlines_with_limit.iloc[-1] > limited.balanced_buffer.iloc[-1]

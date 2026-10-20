@@ -31,7 +31,7 @@ def performance_chart(day: pd.DataFrame, cap: float | None = None, limited: bool
     figure = base()
     figure.add_trace(go.Bar(x=day.hour, y=day.created_scaled, name="Nové vzniky",
                             marker_color=PALE, opacity=.3))
-    add_line(figure,day,"current_limited" if limited else "current_pick","Pick podľa dnešného profilu",BLUE)
+    add_line(figure,day,"current_pick","Aktuálny pick · pôvodný výkon",BLUE)
     add_line(figure,day,"prepick_smoothed_scaled" if limited else "balanced_required","Vyrovnaný pick",GREEN)
     if cap is not None:
         figure.add_hline(y=cap,line_color="#ffb454",line_dash="dash",
@@ -46,10 +46,10 @@ def inventory_chart(day: pd.DataFrame, initial: float, limited: bool = False,
     x = [day.hour.iloc[0]] + (day.hour + pd.Timedelta(hours=1)).tolist()
     if cumulative:
         series = [("Vzniknuté celkom", [initial]+day.cumulative_created_scaled.tolist(), PALE),
-                  ("Pick podľa dnešného profilu", [0]+day["cumulative_current_limited" if limited else "cumulative_current"].tolist(), BLUE),
+                  ("Aktuálny pick · pôvodný výkon", [0]+day.cumulative_current.tolist(), BLUE),
                   ("Vyrovnaný pick", [0]+day["cumulative_simulated" if limited else "cumulative_balanced_required"].tolist(), GREEN)]
     else:
-        series = [("Buffer · dnešný profil", [initial]+day["current_limited_backlog" if limited else "current_backlog"].tolist(), BLUE),
+        series = [("Buffer · pôvodný výkon", [initial]+day.current_backlog.tolist(), BLUE),
                   ("Buffer · vyrovnaný pick", [initial]+day["scenario_backlog" if limited else "balanced_required_backlog"].tolist(), GREEN)]
     for label, values, color in series:
         figure.add_trace(go.Scatter(x=x, y=values, name=label, mode="lines+markers",

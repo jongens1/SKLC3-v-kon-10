@@ -7,7 +7,7 @@ import streamlit as st
 
 from src.config import ALLOWED_JOB_TYPES, ZONE
 from src.data_processing import collection_distribution, event_timeline, operational_window, prepare_data
-from src.dashboard import analyze, rescale, comparison_table
+from src.dashboard import analyze, rescale, comparison_table, hourly_output
 from src.demo_data import demo_data
 from src.plots import arrivals_chart, collection_chart, performance_chart, comparison_charts, lines
 from src.snapshot import load_snapshot, manifest
@@ -57,8 +57,8 @@ with st.sidebar:
     day = st.date_input("Logistický deň",date(2026,10,15))
     st.caption("06:00 → 06:00 nasledujúceho dňa · Bratislava")
     cap = st.number_input("Limit skladu (jl/h)",min_value=0.0,value=10000.0,step=500.0)
-    limited = st.checkbox("Uplatniť limit v krivkách",False,
-                          help="Vypnuté: potrebné výkony a prekročenia limitu. Zapnuté: realizovateľný pick a buffer pri dodržaní limitu.")
+    limited = st.checkbox("Uplatniť limit v krivkách",True,
+                          help="Limit sa uplatňuje na vyrovnaný plán. Aktuálny variant je pôvodný nameraný výkon bez úprav. Vypnuté: teoretická potreba bez limitu.")
     with st.expander("Možnosti plánovania"):
         safety = st.number_input("Predstih pred svozom (h)",min_value=0.0,max_value=168.0,value=1.0,step=.5)
         selected_types = st.multiselect("Procesy",list(ALLOWED_JOB_TYPES),default=list(ALLOWED_JOB_TYPES))
@@ -117,10 +117,10 @@ view = st.radio("Pohľad",["Výkon a plán","Buffer a vznik","Svozy","Dáta a ex
 if view in ["Výkon a plán","Buffer a vznik"]:
     if view == "Výkon a plán":
         st.subheader("Vzniky a pickovanie v rovnakom scenári")
-        st.caption("Modrá zachováva hodinový profil nameraného výkonu skladu, prepočítaný na cieľový objem. "
+        st.caption("Modrá používa pôvodný nameraný výkon skladu bez škálovania na cieľový objem. "
                    "Zelená vyrovnáva výkon pri rešpektovaní vzniku a splniteľných svozových termínov. Obe začínajú s rovnakým plným buffrom.")
         if limited:
-            st.info("Krivky dodržiavajú limit skladu. Nevyužitá kapacita sa neprenáša do ďalšej hodiny; nevypickovaná práca zostáva v buffri.")
+            st.info("Vyrovnaný pick dodržiava limit skladu. Modrá zostáva pôvodným výkonom bez úprav. Nevyužitá kapacita sa neprenáša do ďalšej hodiny; nevypickovaná práca zostáva v buffri.")
         else:
             st.caption("Krivky ukazujú potrebný pick bez obmedzenia kapacity. Oranžová je limit skladu. Pre reálny dopad limitu zapni jeho uplatnenie vľavo.")
         st.plotly_chart(performance_chart(day_frame,cap,limited),width="stretch",key="main_performance")
@@ -130,7 +130,7 @@ if view in ["Výkon a plán","Buffer a vznik"]:
         over_current = day_frame.current_pick > cap + 1e-4
         over_balanced = day_frame.balanced_required > cap + 1e-4
         cols = st.columns(3)
-        cols[0].metric("Nad limitom · dnešný profil",f"{int(over_current.sum())} h")
+        cols[0].metric("Nad limitom · pôvodný výkon",f"{int(over_current.sum())} h")
         cols[1].metric("Nad limitom · vyrovnaný pick",f"{int(over_balanced.sum())} h")
         cols[2].metric("Nesplnené v termíne pri limite",fmt(report.unmet))
         st.caption(f"Potrebná vyrovnaná špička bez limitu: {fmt(day_frame.balanced_required.max())} jl/h. "
@@ -143,10 +143,16 @@ if view in ["Výkon a plán","Buffer a vznik"]:
     st.caption("Aktuálny výkon bez úprav = pôvodné namerané jl/h skladu bez škálovania a bez nového limitu. "
                "Používame ho ako kapacitu pre zvolenú kohortu; pri nedostatku dostupnej práce sa pick zastaví. "
                "Ide o simuláciu pri pôvodnom výkone, nie historické pickovanie tejto kohorty.")
-    st.caption("Vyrovnaný pick: " + (f"s limitom {fmt(cap)} jl/h." if limited else "bez obmedzenia kapacity.") +
-               " Oba varianty začínajú s rovnakým plným buffrom a nulovým pickom. "
-               + ("Horný hodinový graf používa dnešný profil prepočítaný na cieľ; toto porovnanie ponecháva pôvodný výkon."
-                  if view=="Výkon a plán" else ""))
+    if limited:
+        st.info(f"Zobrazený vyrovnaný plán má limit {fmt(cap)} jl/h · denná kapacita {fmt(cap*len(day_frame))} joblines. "
+                "Aktuálny výkon zostáva pôvodnou nameranou referenciou bez úprav.")
+    else:
+        st.warning("Zobrazený vyrovnaný plán je BEZ LIMITU. Zapni Uplatniť limit v krivkách pre realizovateľný výsledok pri zadanej kapacite.")
+    st.caption("Oba varianty začínajú s rovnakým plným buffrom a nulovým pickom. Všetky grafy používajú rovnakú definíciu aktuálneho výkonu.")
+    outside_day = max(0.0,target-day_frame.cumulative_created_scaled.iloc[-1])
+    if outside_day > 1e-4:
+        st.caption(f"Do konca dňa vznikne {fmt(day_frame.cumulative_created_scaled.iloc[-1])} z cieľových {fmt(target)} joblines. "
+                   f"Rozdiel {outside_day:.2f} pripadá na zdrojové joblines vzniknuté až mimo dňa a nemožno ho v tomto dni pickovať.")
     comparison = comparison_table(report,limited)
     selected_time = st.select_slider("Stav k času",options=comparison.time.tolist(),
                                      value=comparison.time.iloc[-1],format_func=lambda t:t.strftime("%d.%m. %H:%M"),
@@ -157,6 +163,12 @@ if view in ["Výkon a plán","Buffer a vznik"]:
     for col,label,column in zip(cols,["Vzniknuté joblines","Vypickované · vyrovnaný pick","Vypickované · aktuálny výkon"],
                                 ["created","picked_balanced","picked_current"]):
         col.metric(label,fmt(selected[column]))
+    if limited:
+        elapsed = int(comparison.index[comparison.time==selected_time][0])
+        completed_on_time = day_frame.cumulative_completed_on_time.iloc[elapsed-1] if elapsed else 0
+        completed_late = day_frame.cumulative_completed_late.iloc[elapsed-1] if elapsed else 0
+        st.caption(f"Z vyrovnaného picku do zvoleného času: {fmt(completed_on_time)} v termíne a {fmt(completed_late)} po termíne. "
+                   "Celkový pick neznamená, že boli dodržané všetky svozové termíny.")
     st.caption("1. Vzniknuté a vypickované joblines celkom do zvoleného času · biela zvislá čiara označuje vybraný čas.")
     st.plotly_chart(cumulative_plot,width="stretch",key="comparison_cumulative")
     cols = st.columns(2)
@@ -208,21 +220,36 @@ else:
         st.json(metadata)
         st.caption("Chýbajúce pickovanie samo osebe neznamená otvorenú fyzickú prácu. Storná sú ponechané a vykázané. Časové odhady používajú celé hodiny.")
     if report.structural_unmet:
-        st.dataframe(report.plan.unscheduled.rename(columns={"reason":"Dôvod","count":"Joblines"}),hide_index=True)
-    st.dataframe(day_frame,hide_index=True)
+        rejections = report.plan.unscheduled.copy()
+        rejections["Cieľový objem"] = rejections["count"]*factor
+        st.dataframe(rejections.rename(columns={"reason":"Dôvod","count":"Zdrojové joblines"}),hide_index=True)
+    st.caption("Hodinový výstup používa rovnaký aktuálny pick, vyrovnaný pick a buffer ako grafy. "
+               "hour_start označuje začiatok výkonu, kumulatívne hodnoty sú stav k hour_end. "
+               "Stĺpce with_limit vždy vykazujú variant pri zadanom limite.")
+    exported_hourly = hourly_output(report,limited)
+    st.dataframe(exported_hourly,hide_index=True)
+    with st.expander("Úplná auditná tabuľka vrátane historických referencií"):
+        st.caption("picked_count, cumulative_picked a backlog sú pôvodná história kohorty. Ich scaled varianty sú len prepočítané historické referencie; nejde o scenárový buffer.")
+        st.dataframe(day_frame,hide_index=True)
     types = data.groupby("job_type",as_index=False).jobline_count.sum()
     scenario = pd.DataFrame([dict(day=str(day),real_volume=actual,target_volume=target,scaling_factor=factor,
                                  initial_buffer=report.initial_buffer,initial_buffer_scaled=report.initial_buffer*factor,
                                  already_completed_before_planning=report.completed_before_planning,
                                  safety_hours=safety,lookback_hours=0,cap=cap,unmet=report.unmet,source=source,
                                  historical_prepicking_ignored=True,limit_applied_to_charts=limited)])
+    scenario["day_hours"] = len(day_frame)
+    scenario["daily_capacity"] = cap*len(day_frame)
+    scenario["created_by_day_end"] = day_frame.cumulative_created_scaled.iloc[-1]
+    scenario["not_created_by_day_end"] = max(0.0,target-day_frame.cumulative_created_scaled.iloc[-1])
+    scenario["balanced_picked_with_limit"] = report.simulation.scheduled
+    scenario["missed_deadlines_with_limit"] = report.unmet
     audit = report.simulation.allocations.copy()
     if len(audit):
         audit["on_time"] = report.plan.groups.on_time.reindex(audit.group).to_numpy()
         times = pd.DatetimeIndex(report.planning.hour)
         audit["slot_start"] = times[audit.hour.to_numpy(dtype=int)]
         audit["slot_end"] = audit.slot_start+pd.Timedelta(hours=1)
-    exports = [(day_frame,"Hodinový prehľad","hourly"),(report.planning,"Celé plánovacie okno","planning"),
+    exports = [(exported_hourly,"Hodinový prehľad","hourly"),(report.planning,"Úplný audit vrátane histórie","planning"),
                (collections,"Svozy","collections"),(throughput,"Skutočný výkon skladu","actual_picking"),
                (types,"Typy procesov","types"),(scenario,"Nastavenia a výsledok","scenario"),
                (audit,"Audit plánovania","audit")]

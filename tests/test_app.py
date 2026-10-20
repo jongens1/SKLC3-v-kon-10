@@ -20,6 +20,7 @@ def test_default_is_real_snapshot_and_runs_without_network(monkeypatch):
     assert next(x for x in test.metric if x.label=="Vstupný buffer o 06:00").value == "55 990"
     assert next(x for x in test.metric if x.label=="Skutočne vypickované v dni").value == "114 649"
     assert not any("DEMO" in w.value for w in test.warning)
+    assert next(x for x in test.sidebar.checkbox if x.label=="Uplatniť limit v krivkách").value is True
 
 
 def test_target_changes_without_changing_measured_picks():
@@ -56,3 +57,21 @@ def test_zero_target_and_cap_and_demo_are_explicit():
     next(x for x in test.sidebar.selectbox if x.label=="Dátový zdroj").set_value("DEMO · syntetické dáta").run()
     assert not test.exception
     assert any("DEMO" in w.value for w in test.warning)
+
+
+def test_requested_270000_15000_scenario_and_all_views():
+    test = app()
+    next(x for x in test.sidebar.number_input if x.label=="Limit skladu (jl/h)").set_value(15000).run()
+    next(x for x in test.sidebar.number_input if x.label=="Cieľový objem joblines").set_value(270000).run()
+    assert not test.exception
+    expected = {"Vstupný buffer o 06:00":"124 638","Vzniknuté joblines":"269 998",
+                "Vypickované · vyrovnaný pick":"269 998","Vypickované · aktuálny výkon":"114 649",
+                "Buffer · vyrovnaný pick":"0","Buffer · aktuálny výkon":"155 349",
+                "Nesplnené v termíne pri limite":"80 181","Nad limitom · pôvodný výkon":"0 h",
+                "Nad limitom · vyrovnaný pick":"0 h"}
+    for label,value in expected.items():
+        assert next(x for x in test.metric if x.label==label).value == value
+    assert any("2.23" in caption.value for caption in test.caption)
+    for view in ["Buffer a vznik","Svozy","Dáta a export","Výkon a plán"]:
+        test.radio[0].set_value(view).run()
+        assert not test.exception

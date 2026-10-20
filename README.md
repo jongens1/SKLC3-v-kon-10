@@ -21,8 +21,8 @@ DEMO je samostatná explicitná voľba. Nepoužíva sa tichý prechod na demo.
 
 ## Čo vidíš
 
-- **Výkon a plán:** stĺpce sú nové vzniky, modrá je simulovaný pick podľa dnešného
-  hodinového profilu, zelená vyrovnaný pick. Oba scenáre majú rovnaký cieľový objem.
+- **Výkon a plán:** stĺpce sú nové vzniky, modrá je pick pri pôvodnom nameranom
+  výkone bez škálovania, zelená vyrovnaný pick. Oba čerpajú z rovnakého bufferu a vznikov.
 - **Buffer a vznik:** oba priebehy bufferu a kumulatívna kontrola vznikov/pickov
   s presnými hodnotami pre vybraný čas sú tu hneď hore. Porovnanie je dostupné
   aj na hlavnom pohľade; rozbaliteľný detail obsahuje jeden stĺpec vstupného bufferu.
@@ -67,11 +67,11 @@ počas logistického dňa, aj keď patria do iných svozových dní. Jeho špič
 celkového výkonu, nie o celý výkon skladu. Je dostupné v rozbalenej referencii.
 Rozdiel nie je chyba sumy: rady majú rôzny dátový výber.
 
-Modrá hlavná krivka je **scenár**, nie nameraná história:
-`požadovaný pick[h] = cieľ × nameraný výkon[h] / súčet nameraného výkonu dňa`.
+Modrá hlavná krivka je **scenár pri pôvodnom výkone**, nie historický pick kohorty:
+`požadovaný pick[h] = pôvodný nameraný výkon skladu[h]`.
 Vykonaný pick sa obmedzí dostupnou prácou; nevyužitá kapacita sa neprenáša.
-Nevypickované joblines zostávajú v rade. Pri zapnutí limitu sa každá hodina
-navyše obmedzí jeho hodnotou. Bez nameraného profilu sa použije rovnomerný profil.
+Nevypickované joblines zostávajú v rade. Zmena cieľového objemu nezvyšuje nameraný
+výkon. Nový limit sa uplatňuje na vyrovnaný plán; pôvodná referencia zostáva bez úprav.
 
 ### Presné porovnanie vznikov, pickov a bufferu
 
@@ -87,9 +87,8 @@ a nemení ho nový limit skladu. Skutočný simulovaný pick sa zastaví pri ned
 vzniknutej a dostupnej práce. Nejde o tvrdenie, že sklad historicky pickoval iba
 túto kohortu. Vyrovnaný variant rešpektuje prepínač uplatnenia limitu.
 
-Tento rad je zámerne odlišný od horného hodinového grafu, ktorý porovnáva
-dnešný profil prepočítaný na rovnaký cieľový objem. Napríklad pri cieli 250 000
-je v novom porovnaní pôvodný denný výkon 114 649 a koncový buffer 135 349 jl;
+Všetky grafy a hlavný hodinový export používajú tú istú definíciu pôvodného výkonu.
+Napríklad pri cieli 250 000 je pôvodný denný výkon 114 649 a koncový buffer 135 349 jl;
 všetka dostupná pôvodná kapacita sa v tomto prípade využije.
 
 ### Vstupný buffer
@@ -130,16 +129,43 @@ každej skupiny a jej dostupných slotov. Odstraňuje ľubovoľné prázdne slot
 rovnocenných riešení toku. Pri limite sa najprv maximalizuje realizovateľný objem.
 Pri cieli 250 000 vychádza potrebný rovnomerný výkon približne **10 417 jl/h**.
 
-**Limit skladu** je viditeľný vľavo. Predvolene je referenčnou čiarou, aby bolo
-vidieť, kde ho potrebné výkony prekračujú. Voľba **Uplatniť limit v krivkách**
-prepne oba pickové priebehy aj oba buffre na realizovateľný variant pri tomto
-limite. Počty hodín nad limitom vždy vychádzajú z potrieb bez limitu. Metrika
+**Limit skladu** je viditeľný vľavo a predvolene sa uplatňuje na vyrovnaný pick
+aj jeho buffer. Vypnutie **Uplatniť limit v krivkách** zobrazí teoretickú potrebu
+bez limitu s výrazným upozornením. Pôvodná nameraná referencia sa novým limitom
+nedeformuje. Počty hodín nad limitom vždy vychádzajú z potrieb bez limitu. Metrika
 nesplnených termínov je odlišná od zostávajúceho bufferu: oneskorená práca môže
 byť ešte v daný deň vypickovaná. Audit označuje tieto pridelenia `on_time=False`.
 
-Hodinový export obsahuje oba scenáre bez limitu aj s limitom, kumulatívne
-vzniky, pick a buffre. Namerané stĺpce sú iba auditná referencia a nemenia
-scenárový vstupný buffer.
+Hodinový export obsahuje ten istý zobrazený scenár ako grafy, čas začiatku a konca
+slotu, vzniky, pick a buffre. Stĺpce `with_limit` sú vždy kapacitne obmedzený plán.
+Kumulatívny počet zmeškaných termínov berie do úvahy termín každej skupiny;
+neskoré dokončenie ho spätne nevymaže. Súčet dokončených v termíne a po termíne
+je rovný celkovému picku. Úplný audit s historickými referenciami sa exportuje
+osobitne. `picked_count`, `cumulative_picked`, `backlog` a ich scaled varianty
+patria pôvodnej histórii, nie scenárovému bufferu.
+
+### Overený scenár 270 000 / 15 000 jl/h
+
+Deň 15. 10. 06:00–16. 10. 06:00, predstih 1 h, bez historického predpickovania:
+
+| Hodnota | Joblines |
+|---|---:|
+| Počiatočný buffer | 124 637.65 |
+| Nové vzniky počas dňa | 145 360.13 |
+| Vzniknuté celkom | 269 997.77 |
+| Vyrovnaný pick | 269 997.77 |
+| Pôvodný výkon | 114 649.00 |
+| Koncový buffer pri vyrovnaní | 0.00 |
+| Koncový buffer pri pôvodnom výkone | 155 348.77 |
+| Vyrovnaný pick v termíne | 189 819.19 |
+| Vyrovnaný pick po termíne | 80 178.58 |
+| Nesplnené termíny vrátane práce mimo dňa | 80 180.81 |
+
+Potrebná špička je 11 249.91 jl/h, pod limitom 15 000. Celá denná kapacita je
+360 000, ale vyššia kapacita než dopyt neznamená viac vypickovaných joblines.
+Jeden zdrojový jobline vznikol až 16. 10. 14:51; po škálovaní predstavuje 2.23,
+preto vzniknutý objem nie je presne 270 000. Zmeškané termíny sú spôsobené
+scenárom bez predpickovania a nemožnými časmi; neznamenajú zostávajúci buffer.
 
 ## Obsah snapshotu
 

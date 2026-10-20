@@ -1,6 +1,6 @@
 # Overenie offline dashboardu
 
-Overené 20. 10. 2026, Python 3.12. Posledný úplný beh: **48 testov prešlo**.
+Overené 20. 10. 2026, Python 3.12. Posledný úplný beh: **51 testov prešlo**.
 Overuje sa aj spustenie Streamlit AppTest so zablokovaným sieťovým pripojením.
 
 ## Reálne dátové kontroly
@@ -37,8 +37,9 @@ limite nesmie oneskorená práca vytlačiť prácu, ktorú ešte možno stihnú�
 
 Streamlit AppTest prešiel všetky štyri pohľady, prepočet na 250 000, zachovanie
 skutočného výkonu pri zmene cieľa, explicitný demo režim, limit a exporty.
-Hlavný pohľad obsahuje vzniky, dnešný profil a vyrovnaný pick, oranžový limit,
-oba buffre a kumulatívnu kontrolu. Prepínač limitu mení pick aj buffer spoločne.
+Hlavný pohľad obsahuje vzniky, pôvodný výkon a vyrovnaný pick, oranžový limit,
+oba buffre a kumulatívnu kontrolu. Prepínač limitu mení vyrovnaný pick aj jeho
+buffer spoločne; pôvodná referencia zostáva bez škálovania vo všetkých pohľadoch.
 
 Presné porovnanie v pohľade Buffer a vznik používa pôvodný nameraný výkon skladu
 bez škálovania ako kapacitu pre kohortu. Pri cieli 250 000 vykoná 114 649 pickov
@@ -47,6 +48,26 @@ variant rešpektuje prepínač limitu. Nové regresie overujú bilancie oboch va
 pri cieľoch 0, 121 290 a 250 000, pôvodnú kapacitu, zhodu piatich grafových radov
 s tabuľkou a počiatočné/koncové časové hranice. AppTest overuje zmenu posuvníka
 na 06:00 vrátane presných číselných kariet a nulového kumulatívneho picku.
+
+## Audit cieľa 270 000 pri limite 15 000 jl/h
+
+Nezávislý kontrolný výpočet overil 21 bilancií a obmedzení zdroja, hodinových
+výkonov, bufferov, termínov, procesov, časových hraníc a auditných pridelení.
+AppTest overil zadané nastavenie aj všetky štyri pohľady.
+
+- Počiatočný buffer 124 637.65 + vzniky 145 360.13 = 269 997.77.
+- Vyrovnaný výkon 11 249.91 jl/h; denný pick 269 997.77; buffer 0.
+- Pôvodný výkon 114 649; koncový buffer 155 348.77; všetky grafy a exporty sa zhodujú.
+- Dokončené v termíne 189 819.19 + po termíne 80 178.58 = celkový pick.
+- Zmeškané termíny 80 180.81. Zhodujú sa denná metrika aj posledný riadok exportu.
+- Rozdiel 2.23 do cieľa je jediný zdrojový jobline vzniknutý po konci dňa.
+- Pri limite 10 000 kontrolný výpočet zníži pick na 240 000 a ponechá 29 997.77
+  vzniknutých joblines v buffri. Neobmedzený variant je zreteľne označený.
+
+Opravené boli dve nezhody: horný graf už neškáluje pôvodný výkon na cieľový objem
+a export už nevymazáva zmeškané termíny neskorým dokončením iných joblines.
+Limit je predvolene zapnutý. Hlavný hodinový export je totožný so zobrazeným
+scenárom; historické referencie sú samostatne označené v úplnom audite.
 
 Aplikácia neimportuje BigQuery klienta, nečíta Google credentials a pri používaní
 nevolá query. Konektor a konfigurácia zostávajú iba pre offline prípravu snapshotov.
