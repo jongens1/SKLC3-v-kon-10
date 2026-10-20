@@ -7,5 +7,5 @@ __pycache__/
 *.egg-info/
 credentials*.json
 service-account*.json
-data/
+data/private/
 exports/

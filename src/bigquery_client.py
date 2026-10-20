@@ -9,8 +9,8 @@ if TYPE_CHECKING:
     from google.cloud import bigquery
 
 
-def build_query(config: BigQueryConfig) -> str:
-    """Select by COLLECTION time and process type; never restrict created time."""
+def _canonical_source(config: BigQueryConfig) -> str:
+    """Latest versions and the shared native process mapping."""
     config.validate()
     c = config.columns
     def col(alias: str, key: str, sql_type: str) -> str:
@@ -63,7 +63,12 @@ canonical AS (
  {col('l','job_type','STRING')} AS job_type, FALSE AS is_cancelled
  FROM latest l
 )"""
-    return f"""WITH {source}, cohort AS (
+    return source
+
+
+def build_query(config: BigQueryConfig) -> str:
+    """Select by COLLECTION time and process type; never restrict created time."""
+    return f"""WITH {_canonical_source(config)}, cohort AS (
  SELECT * FROM canonical
  WHERE collection_at >= @collection_start AND collection_at < @collection_end
  AND (branch_id=@branch_id OR UPPER(COALESCE(store_name,'')) LIKE UPPER(@store_pattern)
@@ -91,6 +96,21 @@ FROM buckets GROUP BY 1,2,3,4,5,6,7,8,9,10,11
 ORDER BY collection_at,created_at,store_id"""
 
 
+def build_actual_throughput_query(config: BigQueryConfig) -> str:
+    """Observed warehouse picks in the day, including jobs for OTHER collection days."""
+    return f"""WITH {_canonical_source(config)}, selected AS (
+ SELECT *, COUNT(*) OVER(PARTITION BY jobline_id) AS id_occurrences
+ FROM canonical
+ WHERE picked_at >= @collection_start AND picked_at < @collection_end
+ AND (branch_id=@branch_id OR UPPER(COALESCE(store_name,'')) LIKE UPPER(@store_pattern)
+      OR UPPER(COALESCE(store_id,'')) LIKE UPPER(@store_pattern))
+ AND job_type IN UNNEST(@allowed_job_types)
+)
+SELECT TIMESTAMP_TRUNC(picked_at,HOUR,@timezone) AS hour,job_type,
+ COUNT(*) AS picked_count,COUNTIF(jobline_id IS NULL OR id_occurrences>1) AS invalid_ids
+FROM selected GROUP BY 1,2 ORDER BY 1,2"""
+
+
 def query_parameters(config: BigQueryConfig, start: pd.Timestamp, end: pd.Timestamp) -> list[dict[str, Any]]:
     """REST bindings also serve independent read-only connector verification."""
     scalar = {"collection_start": ("TIMESTAMP", start.isoformat()), "collection_end": ("TIMESTAMP", end.isoformat()),
@@ -113,8 +133,8 @@ def make_client(config: BigQueryConfig, secrets: Mapping[str, Any] | None = None
     return bigquery.Client(project=config.billing_project, credentials=credentials, location=config.location)
 
 
-def load_joblines(config: BigQueryConfig, start: pd.Timestamp, end: pd.Timestamp,
-                  secrets: Mapping[str, Any] | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+def _read_query(config: BigQueryConfig, start: pd.Timestamp, end: pd.Timestamp, query: str,
+                secrets: Mapping[str, Any] | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
     """SELECT only; latest versions before filters; no destination table or schema writes."""
     from google.cloud import bigquery
     parameters = []
@@ -125,7 +145,7 @@ def load_joblines(config: BigQueryConfig, start: pd.Timestamp, end: pd.Timestamp
             parameters.append(bigquery.ArrayQueryParameter(item["name"], "STRING", [v["value"] for v in value["arrayValues"]]))
         else:
             parameters.append(bigquery.ScalarQueryParameter(item["name"], kind, value["value"]))
-    job = make_client(config, secrets).query(build_query(config),
+    job = make_client(config, secrets).query(query,
                 job_config=bigquery.QueryJobConfig(query_parameters=parameters), location=config.location)
     rows = job.result(timeout=180)
     data = pd.DataFrame([dict(row.items()) for row in rows])
@@ -133,3 +153,18 @@ def load_joblines(config: BigQueryConfig, start: pd.Timestamp, end: pd.Timestamp
                   "source_project": config.source_project, "location": config.location,
                   "bytes_processed": job.total_bytes_processed, "cohort_basis": "collection_at",
                   "allowed_job_types": list(config.allowed_job_types)}
+
+
+def load_joblines(config: BigQueryConfig, start: pd.Timestamp, end: pd.Timestamp,
+                  secrets: Mapping[str, Any] | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Offline preparation only; the Streamlit application never invokes this."""
+    return _read_query(config,start,end,build_query(config),secrets)
+
+
+def load_actual_throughput(config: BigQueryConfig, start: pd.Timestamp, end: pd.Timestamp,
+                           secrets: Mapping[str, Any] | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+    data,provenance = _read_query(config,start,end,build_actual_throughput_query(config),secrets)
+    if len(data) and data.invalid_ids.sum():
+        raise ValueError("Neunikátne ID v skutočnom výkone skladu.")
+    provenance["cohort_basis"] = "picked_at"
+    return data,provenance

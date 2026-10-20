@@ -1,0 +1,42 @@
+{
+  "version": 2,
+  "days": {
+    "2026-10-15": {
+      "start": "2026-10-15T06:00:00+02:00",
+      "end": "2026-10-16T06:00:00+02:00",
+      "timezone": "Europe/Bratislava",
+      "prepared_at": "2026-10-20",
+      "source": "p-plat-datadf-l1st.L1_LogisticsViews",
+      "billing_project": "d-log-bi-common",
+      "collection_column": "DepartureLimitTime",
+      "cohort_job": "job_pxqbC0MlzPbzzcI3fsVgbDEKbV1T",
+      "actual_job": "job_s-iQPjos83qgeQgB3aGeojcF92vm",
+      "cohort": {
+        "file": "sklc3_collection_2026-10-15.parquet",
+        "sha256": "f7d9ad026e72cb4508e3062343e5f0520a52a4dc05488a78dd1ae196adaa51e4"
+      },
+      "throughput": {
+        "file": "sklc3_actual_picking_2026-10-15.parquet",
+        "sha256": "c5909d32a3e0a58cdd64a1d9a72a947ae38609ea539087400779623eb6b9ff31"
+      },
+      "summary": {
+        "rows": 121290,
+        "unique_joblines": 121290,
+        "aggregate_rows": 7067,
+        "missing_created": 0,
+        "missing_pick": 1026,
+        "picked": 120264,
+        "missing_collection": 0,
+        "invalid_order": 2,
+        "cancelled": 509,
+        "min_created": "2026-09-27T13:33:36.187000+02:00",
+        "max_created": "2026-10-16T14:51:03.090000+02:00",
+        "min_picked": "2026-10-09T02:50:58.900000+02:00",
+        "max_picked": "2026-10-16T19:58:18.270000+02:00"
+      },
+      "scope": "Branch_ID=6281 OR store name contains SKLC3; outbound Standard / LC / POB",
+      "actual_scope": "All allowed lines picked in the logistic day, regardless of collection day",
+      "contains_individual_ids": false
+    }
+  }
+}

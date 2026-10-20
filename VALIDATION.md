@@ -1,44 +1,38 @@
-# Overenie collection-day implementácie
+# Overenie offline dashboardu
 
-Overené 20. 10. 2026, Windows, Python 3.12. Priame závislosti sú pripnuté
-v requirements.txt. Automatický GitHub Actions workflow nie je súčasťou tejto verzie.
+Overené 20. 10. 2026, Python 3.12. Posledný úplný beh: **37 testov prešlo**.
+Overuje sa aj spustenie Streamlit AppTest so zablokovaným sieťovým pripojením.
 
-Posledný úplný lokálny beh: **29 testov prešlo za 20,28 s**.
+## Reálne dátové kontroly
 
-Testy pokrývajú:
+- Svozová kohorta: 121 290 joblines; Standard 117 005, LC 3 013, POB 1 272.
+- Práca vzniknutá pred dňom: 55 990; už picknuté: 44 421; vstupný buffer: 11 569.
+- Pickovanie pre túto kohortu v dni: 75 837.
+- Celkový skutočný výkon povolených procesov v dni: 114 649.
+- Skutočná špička: 16. 10. 01:00–02:00 Europe/Bratislava, 10 079 jl/h.
+- Súčet plánovania, nenaplánovateľného objemu a práce hotovej pred začiatkom okna
+  presne sedí s kohortou aj po škálovaní na 250 000.
+- Kontrolné súčty oboch priložených Parquetov sedia s manifestom.
 
-- Zaradenie podľa svozu aj pri vzniku niekoľko dní pred sledovaným dňom.
-- Vyradenie svozu mimo intervalu, hoci jobline vznikla v sledovanom dni.
-- Tri povolené typy; ostatné procesy sa vyradia.
-- Deadline ako collection čas mínus bezpečnostný predstih.
-- Zákaz simulovaného pickovania pred dostupnosťou alebo po deadline.
-- Scaling 124 000 → 150 000 vrátane všetkých objemových kriviek.
-- Globálne predĺženie planning okna, carry-in, 0–168 h lookback a DST.
-- Hodinové bucketovanie aj pri polhodinovom UTC offsete a opakovanej DST hodine.
-- Známe optimum vyrovnávania, spoločný limit a zachovanie nenaplánovaného objemu.
-- Chýbajúce dátumy, duplicity ID, neplatné počty a chýbajúce optional stĺpce.
-- Konfiguráciu z env/secrets, validáciu identifikátorov a ARRAY query parametre.
-- Deväť Streamlit sekcií, hour/day grafy, cieľ 150 000, nulový cieľ,
-  168 h lookback, nedostatočný limit a chybu BigQuery credentials.
-- CSV UTF-8 BOM a neutralizáciu textov začínajúcich vzorcom.
+Kohorta bola čítaná jednorazovo cez SELECT-only query
+job_pxqbC0MlzPbzzcI3fsVgbDEKbV1T. Celkový výkon bol samostatne čítaný podľa
+PickedDate query job_s-iQPjos83qgeQgB3aGeojcF92vm. Billing d-log-bi-common,
+zdroj p-plat-datadf-l1st, región europe-west4. Zdrojové objekty sa nemenili.
 
-## BigQuery
+## Výpočty a UI
 
-Nový SQL prešiel skutočným dry runom a následným SELECT-only čítaním
-v europe-west4 pod billing projektom d-log-bi-common.
-Overilo sa, že kohorta obsahuje iba povolené výdajové procesy a zachováva staršie
-vzniky aj všetky neskoršie pickovania. Nad reálnym výsledkom sa overili súčty
-časových radov, kapacitné zachovanie objemu a nezáporný dostupný simulovaný buffer.
-Zdrojové objekty sa nemenili. Produkčné výsledky nie sú uložené v repozitári.
+Testy pokrývajú selection podľa cutoffu, povolené procesy, dátumové hranice,
+chýbajúce časy, duplicity, carry-in, celý plánovací lookback, DST, shared capacity,
+známe optimum, nemožné termíny, maximálny limit a nulový cieľ.
+Nové regresie overujú rozdiel medzi celkovým výkonom a kohortou, dominantnú
+expedíciu, nočnú špičku, jeden vstupný buffer, vyradenie už dokončenej práce
+z opakovaného plánovania a zhodu okamžitého škálovania s úplným výpočtom.
 
-Lokálny Python klient používa vlastné credentials. Jeho generované SQL a REST
-parametre boli použité pri overení cez pripojený read-only konektor; samotné
-lokálne service-account credentials neboli potrebné na toto overenie.
-Python parameter binding bol samostatne overený testom s fake klientom.
+Streamlit AppTest prešiel všetky štyri pohľady, prepočet na 250 000, zachovanie
+skutočného výkonu pri zmene cieľa, explicitný demo režim, limit a exporty.
+Vizuálna kontrola lokálneho servera potvrdila modrú skutočnosť, zelený plán,
+skompaktnené karty a hlavný graf na jednej časovej osi 06:00–06:00.
 
-## Rozsah a obmedzenia
-
-Interakcie UI overuje Streamlit AppTest, aplikácia bola zároveň spustená
-ako skutočný lokálny server. Obchodný význam cutoffu, storná a procesné výnimky
-zostávajú uvedenými obmedzeniami modelu. Celé hodinové sloty sú konzervatívne;
-nejde o presný minútový plán ani dochádzkový model.
+Aplikácia neimportuje BigQuery klienta, nečíta Google credentials a pri používaní
+nevolá query. Konektor a konfigurácia zostávajú iba pre offline prípravu snapshotov.
+Hodinová konzervatívna presnosť a procesné obmedzenia sú uvedené v README.

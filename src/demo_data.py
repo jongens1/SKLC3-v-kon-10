@@ -12,18 +12,22 @@ def demo_data(day: date, start_time: time = time(6), timezone: str = ZONE, volum
         raise ValueError("Demo objem musí byť kladný.")
     start, end = operational_window(day, start_time, timezone)
     hours = pd.date_range(start, end, freq="h", inclusive="left")
-    weights = np.array([2 + 10 * np.exp(-((i - 7) / 4) ** 2) + 6 * np.exp(-((i - 16) / 3) ** 2) for i in range(len(hours))])
+    # Illustrative night shift, clearly separate from the bundled measured data.
+    weights = np.array([1 + 12 * np.exp(-((i - 21) / 2.5) ** 2) + 5 * np.exp(-((i - 18) / 3) ** 2)
+                        for i in range(len(hours))])
     counts = np.floor(weights / weights.sum() * volume).astype(int)
     counts[:volume - int(counts.sum())] += 1
     rows = []
     for i, (hour, count) in enumerate(zip(hours, counts)):
         collection = hour + pd.Timedelta(minutes=30)
-        for k, n in enumerate([int(count // 3), int(count // 3), int(count - 2 * (count // 3))]):
+        distribution = [int(count * .965), int(count * .025)]
+        distribution.append(int(count - sum(distribution)))
+        for k, n in enumerate(distribution):
             if n == 0:
                 continue
             age = [5, 28, 68][k] + i % 4
             created = collection - pd.Timedelta(hours=age, minutes=15)
-            picked = collection - pd.Timedelta(hours=2 + i % 2)
+            picked = collection - pd.Timedelta(hours=2)
             rows.append(dict(created_at=created, picked_at=picked, collection_at=collection,
                              branch_id="6281", store_id="10686", store_name="162 SKLC3",
                              job_type=ALLOWED_JOB_TYPES[k], jobline_count=n, is_cancelled=False))

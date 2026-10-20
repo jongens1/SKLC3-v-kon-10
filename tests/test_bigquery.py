@@ -19,6 +19,14 @@ def test_sql_filters_collection_and_types_not_created():
     assert sql.index("PARTITION BY StoreJob_ID") < sql.index("collection_at >=")
 
 
+def test_actual_performance_uses_picking_time_and_not_collection_filter():
+    from src.bigquery_client import build_actual_throughput_query
+    sql = build_actual_throughput_query(BigQueryConfig())
+    assert "picked_at >= @collection_start" in sql
+    assert "collection_at >=" not in sql
+    assert "job_type IN UNNEST(@allowed_job_types)" in sql
+
+
 def test_array_parameter_and_billing_project():
     start, end = operational_window(date(2026, 10, 15))
     config = BigQueryConfig()

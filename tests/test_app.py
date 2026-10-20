@@ -1,52 +1,50 @@
 from pathlib import Path
+import socket
 from streamlit.testing.v1 import AppTest
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def app():
-    test = AppTest.from_file(str(ROOT / "app.py"), default_timeout=90).run()
-    next(x for x in test.sidebar.selectbox if x.label == "Dátový zdroj").set_value("DEMO · syntetické dáta").run()
-    return test
+    return AppTest.from_file(str(ROOT/"app.py"),default_timeout=90).run()
 
 
-def test_nine_sections_and_target_scaling():
+def test_default_is_real_snapshot_and_runs_without_network(monkeypatch):
+    def offline(*args,**kwargs):raise AssertionError("No network allowed")
+    monkeypatch.setattr(socket,"create_connection",offline)
     test = app()
-    assert not test.exception, [e.value for e in test.exception]
-    assert len(test.subheader) == 9
-    assert next(m for m in test.metric if m.label == "Reálny objem").value == "124,000"
-    next(x for x in test.sidebar.checkbox if x.label == "Manuálne zadať cieľový objem").check().run()
-    next(x for x in test.sidebar.number_input if x.label == "Cieľový objem joblines").set_value(150000).run()
-    assert not test.exception
-    assert next(m for m in test.metric if m.label == "Cieľový objem").value == "150,000"
+    assert not test.exception,[e.value for e in test.exception]
+    assert next(x for x in test.sidebar.selectbox if x.label=="Dátový zdroj").value == "Pripravené dáta z BigQuery"
+    assert next(x for x in test.metric if x.label=="Joblines pre svozy dňa").value == "121 290"
+    assert next(x for x in test.metric if x.label=="Vstupný buffer o 06:00").value == "11 569"
+    assert next(x for x in test.metric if x.label=="Skutočne vypickované v dni").value == "114 649"
+    assert not any("DEMO" in w.value for w in test.warning)
 
 
-def test_day_granularity_and_168_hour_lookback():
+def test_target_changes_without_changing_measured_picks():
     test = app()
-    next(x for x in test.sidebar.selectbox if x.label == "Granularita created/picked grafov").set_value("day").run()
-    next(x for x in test.sidebar.slider if x.label == "Pre-picking planning lookback (h)").set_value(168).run()
+    next(x for x in test.sidebar.number_input if x.label=="Cieľový objem joblines").set_value(250000).run()
     assert not test.exception
-    assert any("192 hodín" in text.value for text in test.markdown)
+    assert next(x for x in test.metric if x.label=="Cieľový objem").value == "250 000"
+    assert next(x for x in test.metric if x.label=="Skutočne vypickované v dni").value == "114 649"
 
 
-def test_insufficient_cap_and_zero_target():
+def test_all_four_views_and_exports():
     test = app()
-    next(x for x in test.sidebar.checkbox if x.label == "Obmedziť maximálny hodinový výkon").check().run()
-    next(x for x in test.sidebar.number_input if x.label.startswith("Maximálny výkon")).set_value(1).run()
-    assert not test.exception
-    assert any("nie je splniteľný" in e.value for e in test.error)
-    next(x for x in test.sidebar.checkbox if x.label == "Manuálne zadať cieľový objem").check().run()
-    next(x for x in test.sidebar.number_input if x.label == "Cieľový objem joblines").set_value(0).run()
-    assert not test.exception
-    assert next(m for m in test.metric if m.label == "Unmet / infeasible volume").value == "0.0"
+    for view in ["Buffer a vznik","Svozy","Dáta a export","Výkon a plán"]:
+        test.radio[0].set_value(view).run()
+        assert not test.exception,(view,[e.value for e in test.exception])
 
 
-def test_bigquery_error_does_not_crash(monkeypatch):
-    import src.bigquery_client as adapter
-    def unavailable(*a, **k):
-        raise RuntimeError("No credentials")
-    monkeypatch.setattr(adapter, "load_joblines", unavailable)
+def test_zero_target_and_cap_and_demo_are_explicit():
     test = app()
-    next(x for x in test.sidebar.selectbox if x.label == "Dátový zdroj").set_value("BigQuery · iba čítanie").run()
+    next(x for x in test.sidebar.checkbox if x.label=="Zadať limit výkonu").check().run()
+    next(x for x in test.sidebar.number_input if x.label=="Limit skladu (jl/h)").set_value(1).run()
     assert not test.exception
-    assert any("BigQuery sa nepodarilo načítať" in e.value for e in test.error)
+    assert any("nedá naplánovať" in w.value for w in test.warning)
+    next(x for x in test.sidebar.number_input if x.label=="Cieľový objem joblines").set_value(0).run()
+    assert not test.exception
+    assert next(x for x in test.metric if x.label=="Nenaplánovateľný objem").value == "0"
+    next(x for x in test.sidebar.selectbox if x.label=="Dátový zdroj").set_value("DEMO · syntetické dáta").run()
+    assert not test.exception
+    assert any("DEMO" in w.value for w in test.warning)
