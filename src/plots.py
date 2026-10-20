@@ -17,9 +17,9 @@ def backlog_chart(frame: pd.DataFrame) -> go.Figure:
     frame = frame.copy()
     frame["stav"] = "stabilný / klesajúci"
     frame.loc[frame.backlog_growing, "stav"] = "rastie"
-    frame.loc[frame.backlog_risky, "stav"] = "rastie pri vysokom required výkone"
+    frame.loc[frame.backlog_risky, "stav"] = "nesplnená kumulatívna potreba"
     figure = px.bar(frame, x="hour", y="backlog_scaled", color="stav",
                     color_discrete_map={"rastie": "#f97316", "stabilný / klesajúci": "#14b8a6",
-                                        "rastie pri vysokom required výkone": "#dc2626"},
+                                        "nesplnená kumulatívna potreba": "#dc2626"},
                     title="Backlog na konci hodiny · cieľový objem", template="plotly_white")
     return figure

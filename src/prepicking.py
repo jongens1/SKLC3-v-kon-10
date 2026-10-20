@@ -71,11 +71,11 @@ class _Flow:
                 total += amount
 
 
-def simulate(groups: pd.DataFrame, n_hours: int, prepick_hours: int,
+def simulate(groups: pd.DataFrame, n_hours: int,
              factor: float = 1.0, max_per_hour: float | None = None) -> Simulation:
-    """Pre-picking window is relative to each group's baseline latest picking slot."""
-    if not 0 <= prepick_hours <= 12:
-        raise ValueError("Okno predpickovania musí byť 0 až 12 hodín.")
+    """Use every slot between availability and deadline in the global planning window."""
+    if not isinstance(n_hours, int) or n_hours < 1:
+        raise ValueError("Planning okno musí obsahovať aspoň jednu hodinu.")
     if factor < 0 or not np.isfinite(factor):
         raise ValueError("Neplatný scaling.")
     if max_per_hour is not None and (max_per_hour < 0 or not np.isfinite(max_per_hour)):
@@ -95,7 +95,7 @@ def simulate(groups: pd.DataFrame, n_hours: int, prepick_hours: int,
         refs = []
         for i, row in enumerate(groups.itertuples()):
             flow.add(source, i, counts[i])
-            earliest = max(int(row.release), int(row.latest) - prepick_hours)
+            earliest = int(row.release)
             if earliest < 0 or row.latest >= n_hours or earliest > row.latest:
                 raise ValueError("Skupina nemá platný hodinový interval.")
             for hour in range(earliest, int(row.latest) + 1):

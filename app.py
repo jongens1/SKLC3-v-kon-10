@@ -1,11 +1,11 @@
-"""SKLC3 Warehouse Picking Performance — Streamlit entry point."""
+"""SKLC3 collection-day picking performance — Streamlit entry point."""
 from __future__ import annotations
 
 from dataclasses import asdict, replace
 from datetime import date, time
+import hashlib
 import json
-from pathlib import Path
-
+import os
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -13,114 +13,107 @@ import streamlit as st
 
 from src.bigquery_client import load_joblines
 from src.config import load_config
-from src.data_processing import (collection_distribution, demo_data, hourly_metrics,
-                                  operational_window, prepare_data)
+from src.data_processing import (collection_distribution, event_timeline, operational_window,
+                                  planning_metrics, planning_window, prepare_data)
+from src.demo_data import demo_data
 from src.performance import apply_scaling, required_plan, scaling_factor
 from src.prepicking import simulate
 from src.plots import backlog_chart, lines
-from src.utils import csv_bytes, read_snapshot
+from src.utils import csv_bytes
 
-ROOT = Path(__file__).resolve().parent
 st.set_page_config(page_title="SKLC3 Warehouse Picking Performance", page_icon="📦", layout="wide")
 st.title("SKLC3 Warehouse Picking Performance")
-st.caption("Logistický deň · Europe/Bratislava · výber podľa vzniku joblines · Branch 6281 alebo názov skladu SKLC3")
+st.caption("Svozový deň podľa collection/cutoff · história vzniku a pickovania bez časového orezu")
 
 
-def get_secrets() -> dict:
+def read_secrets() -> dict:
     try:
         return st.secrets.to_dict()
     except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
         return {}
 
 
-@st.cache_data(ttl=900, show_spinner="Čítam agregáty z BigQuery…")
+@st.cache_data(ttl=900, show_spinner="Čítam svozovú kohortu z BigQuery…")
 def cached_bigquery(config_values: dict, start: pd.Timestamp, end: pd.Timestamp,
                     credential_signature: str, _secrets: dict):
-    # Signature prevents cache reuse after a credential change; secrets themselves
-    # are excluded from Streamlit's argument hashing and are never displayed.
     from src.config import BigQueryConfig
     return load_joblines(BigQueryConfig(**config_values), start, end, _secrets)
 
 
-secrets = get_secrets()
+secrets = read_secrets()
 try:
     config = load_config(secrets)
-except (ValueError, TypeError, json.JSONDecodeError) as exc:
-    st.error(f"Chyba konfigurácie: {exc}")
-    st.info("Oprav .env alebo .streamlit/secrets.toml podľa priložených príkladov.")
+except Exception as exc:
+    st.error(f"Neplatná konfigurácia: {exc}")
+    st.info("Skontroluj .env alebo .streamlit/secrets.toml podľa príkladov v repozitári.")
     st.stop()
 
-metadata_path = ROOT / "data" / "snapshot_metadata.json"
-snapshot_meta = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else None
 with st.sidebar:
     st.header("Nastavenia SKLC3")
-    day = st.date_input("Logistický deň", date(2026, 10, 15))
-    start_time = st.time_input("Začiatok logistického dňa", time(6), step=3600)
-    choices = (["Overený lokálny snapshot"] if snapshot_meta else []) + ["BigQuery · iba čítanie", "DEMO · syntetické dáta"]
-    source = st.selectbox("Dátový zdroj", choices)
-    safety = st.number_input("Bezpečnostný predstih pred cutoffom (h)", min_value=0.0, max_value=12.0, value=1.0, step=0.5)
-    lookback = st.slider("Okno predpickovania (h)", 0, 12, 4)
+    day = st.date_input("Sledovaný svozový deň", date(2026, 10, 15))
+    start_time = st.time_input("Začiatok logistického dňa", time.fromisoformat(config.default_logistic_start_time), step=3600)
+    timezone = st.text_input("Timezone", config.timezone)
+    available_credentials = bool(secrets.get("gcp_service_account") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+    source = st.selectbox("Dátový zdroj", ["BigQuery · iba čítanie", "DEMO · syntetické dáta"],
+                          index=0 if available_credentials else 1)
+    safety = st.number_input("Safety buffer pred svozom (h)", min_value=0.0, max_value=168.0, value=1.0, step=0.5)
+    lookback = st.slider("Pre-picking planning lookback (h)", 0, 168, 24)
+    granularity = st.selectbox("Granularita created/picked grafov", ["hour", "day"])
     use_cap = st.checkbox("Obmedziť maximálny hodinový výkon", False)
     cap = st.number_input("Maximálny výkon pre cieľový objem (jl/h)", min_value=0.0, value=10000.0, step=500.0) if use_cap else None
-    with st.expander("BigQuery konfigurácia"):
-        st.caption("Konfigurácia: prostredie / .env → Streamlit secrets → predvolené hodnoty.")
+    with st.expander("BigQuery konfigurácia a stĺpce"):
         billing = st.text_input("Billing project", config.billing_project)
-        project = st.text_input("Zdrojový project", config.source_project)
+        project = st.text_input("Zdrojový GCP project", config.source_project)
         dataset = st.text_input("Dataset", config.dataset)
-        location = st.text_input("Región", config.location)
+        table = st.text_input("Joblines table / view", config.table)
+        location = st.text_input("Región BigQuery", config.location)
         mode = st.selectbox("Zdrojová schéma", ["joined", "flat"], index=["joined", "flat"].index(config.mode))
-        table = st.text_input("Joblines tabuľka / view", config.table)
-        mapping = st.text_area("Mapovanie stĺpcov pre flat režim (JSON)", json.dumps(config.columns, indent=2))
-        st.caption("joined používa v_StoreJobs, v_StoreJobLineStates a v_Stores. Ich názvy sa nastavujú v .env / secrets.")
-        if st.button("Obnoviť cache BigQuery"):
+        mapping_text = st.text_area("Mapovanie stĺpcov (JSON)", json.dumps(config.columns, ensure_ascii=False, indent=2))
+        allowed_text = st.text_area("Povolené job typy (oddelené čiarkou)", ",".join(config.allowed_job_types))
+        branch = st.text_input("Branch ID", config.branch_id)
+        pattern = st.text_input("Store LIKE pattern", config.store_pattern)
+        st.caption("joined mapuje natívne typy podľa ID a smeru. job_type mapovanie sa používa pre flat tabuľku. Názvy pripojených tabuliek sa nastavujú v .env / secrets.")
+        if st.button("Obnoviť BigQuery cache"):
             cached_bigquery.clear()
-    config = replace(config, billing_project=billing, source_project=project, dataset=dataset,
-                     location=location, mode=mode, table=table)
 
 try:
-    config = replace(config, columns=json.loads(mapping))
+    config = replace(config, billing_project=billing, source_project=project, dataset=dataset,
+                     table=table, location=location, mode=mode, timezone=timezone,
+                     columns=json.loads(mapping_text), branch_id=branch, store_pattern=pattern,
+                     allowed_job_types=tuple(v.strip() for v in allowed_text.split(",") if v.strip()))
     config.validate()
-    start, end = operational_window(day, start_time)
-except (ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+    start, end = operational_window(day, start_time, timezone)
+    hours = planning_window(start, end, int(lookback))
+except Exception as exc:
     st.error(f"Neplatné nastavenia: {exc}")
     st.stop()
 
 provenance = {}
 try:
     if source.startswith("DEMO"):
-        raw = demo_data(day, start_time)
-        st.warning("DEMO · syntetických 124 000 joblines. Výsledky neslúžia na hodnotenie skutočného skladu.")
-    elif source.startswith("Overený"):
-        if start.isoformat() != snapshot_meta["start"] or end.isoformat() != snapshot_meta["end"]:
-            st.warning("Lokálny snapshot pokrýva iba 15. 10. 2026 06:00 – 16. 10. 2026 06:00. Pre iný deň vyber BigQuery alebo DEMO.")
-            st.stop()
-        raw = read_snapshot(ROOT / "data" / snapshot_meta["file"], snapshot_meta)
-        provenance = snapshot_meta
-        st.info("Lokálny historický snapshot z BigQuery. Obnovenie dát vyžaduje nový čítací dotaz; nejde o live pripojenie.")
+        raw = demo_data(day, start_time, timezone)
+        st.warning("DEMO · 124 000 syntetických joblines pred filtrami. Ide o ukážku, nie reálny výkon skladu.")
     else:
-        import hashlib
-        import os
-        credential_info = {"secrets": secrets.get("gcp_service_account", {}),
-                           "adc": os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "ADC")}
+        credential_info = {"service_account": secrets.get("gcp_service_account", {}),
+                           "adc_path": os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "ADC")}
         signature = hashlib.sha256(json.dumps(credential_info, sort_keys=True).encode()).hexdigest()
         raw, provenance = cached_bigquery(asdict(config), start, end, signature, secrets)
 except Exception as exc:
-    st.error("Dáta sa nepodarilo načítať. Skontroluj credentials, oprávnenia, región a konfiguráciu.")
-    # Provider errors can contain connection details; expose type, not secrets.
-    st.caption(f"Typ chyby: {type(exc).__name__}. Aplikácia podporuje GOOGLE_APPLICATION_CREDENTIALS, ADC a Streamlit secrets.")
-    st.info("Pre lokálne overenie vyber v bočnom paneli DEMO · syntetické dáta.")
+    st.error("BigQuery sa nepodarilo načítať. Skontroluj credentials, oprávnenia, názvy stĺpcov a región.")
+    st.caption(f"Typ chyby: {type(exc).__name__}. Credentials sa nezobrazujú. Konfigurácia podporuje service account, ADC a Streamlit secrets.")
+    st.info("Na lokálne overenie vyber Dátový zdroj → DEMO · syntetické dáta.")
     st.stop()
 
 try:
-    # BigQuery and hash-verified snapshot already applied the location predicate.
-    data, summary, notices = prepare_data(raw, start, end, filter_location=source.startswith("DEMO"))
+    data, summary, notices = prepare_data(raw, start, end, config.allowed_job_types,
+                                         config.branch_id, config.store_pattern)
 except ValueError as exc:
-    st.error(f"Kontrola dát neprešla: {exc}")
+    st.error(f"Kontrola dát: {exc}")
     st.stop()
 
 actual = summary["rows"]
-if not actual:
-    st.warning("Pre zvolený deň a filter SKLC3 nie sú dostupné joblines.")
+if actual == 0:
+    st.warning("Po filtroch svozového času, skladu a typov jobu nie sú dostupné joblines.")
     st.stop()
 with st.sidebar:
     manual = st.checkbox("Manuálne zadať cieľový objem", False)
@@ -128,104 +121,131 @@ with st.sidebar:
                              key=f"target_{source}_{start.isoformat()}_{actual}") if manual else actual
     st.caption(f"Reálny objem: {actual:,} · cieľový objem: {target:,}")
 factor = scaling_factor(actual, target)
-hourly = hourly_metrics(data, start, end)
-hours = pd.DatetimeIndex(hourly.hour)
+created = event_timeline(data, "created_at", granularity)
+picked = event_timeline(data, "picked_at", granularity)
+created["count_scaled"] = created["count"] * factor
+picked["count_scaled"] = picked["count"] * factor
+collections = collection_distribution(data, start, end)
+collections["count_scaled"] = collections["count"] * factor
+hourly = planning_metrics(data, hours)
 plan = required_plan(data, hours, safety)
-historical_simulation = simulate(plan.groups, len(hours), lookback)
-scenario = simulate(plan.groups, len(hours), lookback, factor=factor, max_per_hour=cap)
+real_simulation = simulate(plan.groups, len(hours))
+scenario = simulate(plan.groups, len(hours), factor=factor, max_per_hour=cap)
 hourly["required_pick_count"] = plan.hourly
-hourly["prepick_smoothed_count"] = historical_simulation.hourly
+hourly["cumulative_required"] = plan.overdue_before_window + hourly.required_pick_count.cumsum()
+hourly["prepick_smoothed_count"] = real_simulation.hourly
 hourly = apply_scaling(hourly, factor)
-# With a target cap, this is a new simulation, not a scaled claim of feasibility.
 hourly["prepick_smoothed_scaled"] = scenario.hourly
+hourly["cumulative_simulated"] = hourly.prepick_smoothed_scaled.cumsum()
+hourly["scenario_backlog"] = hourly.cumulative_available_scaled - hourly.cumulative_simulated
 hourly["prepick_difference_scaled"] = hourly.required_pick_scaled - hourly.prepick_smoothed_scaled
-hourly["scenario_backlog"] = hourly.cumulative_created_scaled - hourly.prepick_smoothed_scaled.cumsum()
-hourly["backlog_risky"] = (hourly.backlog_growing & (hourly.required_pick_scaled > (cap if cap is not None else scenario.peak)))
-structural_missing = float(plan.unscheduled["count"].sum()) if len(plan.unscheduled) else 0.0
-unplanned_target = structural_missing * factor + scenario.unscheduled
-if notices or plan.warnings:
-    st.warning(f"Dátové obmedzenia: {summary['missing_cutoff']:,} joblines bez cutoffu, {summary['cancelled']:,} so stornom. Podrobnosti sú v Kvalite a pôvode dát.")
+hourly["deadline_shortfall_scaled"] = np.maximum(0, hourly.cumulative_required_scaled - hourly.cumulative_simulated)
+hourly["backlog_risky"] = hourly.deadline_shortfall_scaled > max(1e-4, target * 1e-9)
+structural = float(plan.unscheduled["count"].sum()) if len(plan.unscheduled) else 0.0
+unmet = structural * factor + scenario.unscheduled
 
 st.subheader("1. Dataset overview")
-st.write(f"**{start:%d.%m.%Y %H:%M %Z} – {end:%d.%m.%Y %H:%M %Z}** · {len(hours)} hodinových intervalov")
+st.write(f"**Svozový interval:** {start:%d.%m.%Y %H:%M %Z} – {end:%d.%m.%Y %H:%M %Z}")
+st.write(f"**Planning okno:** {hours[0]:%d.%m.%Y %H:%M %Z} – {end:%d.%m.%Y %H:%M %Z} · {len(hours)} hodín")
+st.caption(f"Collection stĺpec: {config.columns['collection']} · Job type: {config.columns['job_type']}" +
+           (" (joined: odvodený z JobType_ID, JobSubType_ID a JobDirection_ID)" if config.mode == "joined" else ""))
+st.write("**Povolené typy:** " + ", ".join(config.allowed_job_types))
 cols = st.columns(4)
-for col, label, value in zip(cols, ["Reálny objem", "Unikátne joblines", "Cieľový objem", "Scaling koeficient"],
+for col, label, value in zip(cols, ["Reálny objem", "Unikátne joblines", "Cieľový objem", "Scaling factor"],
                              [f"{actual:,}", f"{summary['unique_joblines']:,}", f"{target:,}", f"{factor:.6f}"]):
     col.metric(label, value)
-cols = st.columns(4)
-for col, label, value in zip(cols, ["S časom pickovania (aj po dni)", "Bez pickovania", "Vypickované až po konci dňa", "Bez cutoffu"],
-                             [summary["picked"], summary["missing_pick"], summary["picked_after_window"], summary["missing_cutoff"]]):
-    col.metric(label, f"{value:,}")
-with st.expander("Kvalita a pôvod dát"):
-    for notice in notices + plan.warnings:
+cols = st.columns(3)
+for col, label, key in zip(cols, ["Bez Created_At", "Bez Picked_At", "Bez collection/cutoff"],
+                           ["missing_created", "missing_pick", "missing_collection"]):
+    col.metric(label, f"{summary[key]:,}")
+st.caption("Joblines bez collection času nemožno priradiť k svozovému dňu a filter ich vyradí. Zobrazený počet je po filtroch; nulová hodnota nepotvrdzuje úplnosť celého zdroja.")
+by_type = data.groupby("job_type", as_index=False).jobline_count.sum()
+by_type["scaled"] = by_type.jobline_count * factor
+st.dataframe(by_type, hide_index=True)
+with st.expander("Časové rozsahy, kvalita a pôvod dát"):
+    for notice in notices:
         st.warning(notice)
     st.json(summary)
     st.json(provenance)
-    st.caption("SQL agregáty majú už overené ID. Počet skupín je technická veľkosť dát; počet a unikátnosť joblines sa vyhodnocujú pred agregáciou. Storná sa nevylučujú automaticky.")
-st.caption("Hodinové metriky znamenajú celý interval [H, H+1). Plán používa iba celé hodiny po vzniku a pred presným deadline mínus predstih. Čiastočné hodiny sa konzervatívne nevyužívajú.")
+    st.caption("Storná zostávajú v požadovanej kohorte. Chýbajúce PickedDate nie je dôkaz otvorenej fyzickej práce. Neplatné poradie historických časov nemení dostupnosť simulácie.")
 
-st.subheader("2. Hourly created vs picked")
-st.plotly_chart(lines(hourly, ["created_count", "picked_count", "created_scaled", "picked_scaled"], "Vznik a pickovanie · skutočnosť a cieľ"), width="stretch")
-st.caption("Pickovanie zahŕňa iba joblines vzniknuté vo vybranom logistickom dni. Neobsahuje prenesenú prácu z predchádzajúcich dní.")
+st.subheader("2. Created timeline")
+st.caption(f"Min Created_At: {summary['min_created']} · Max Created_At: {summary['max_created']}")
+if created.empty:
+    st.warning("Chýbajú časy vzniku; nie je možné vytvoriť created graf.")
+else:
+    st.plotly_chart(lines(created, ["count", "count_scaled"], "Joblines created over time for selected collection day"), width="stretch")
+st.caption("Celá dostupná história vybranej svozovej kohorty, aj niekoľko dní pred svozom.")
 
-st.subheader("3. Cumulative curves")
-st.plotly_chart(lines(hourly, ["cumulative_created_scaled", "cumulative_picked_scaled", "backlog_scaled"], "Kumulatívne počty na konci hodín · cieľ"), width="stretch")
-st.subheader("4. Backlog / buffer")
+st.subheader("3. Picked timeline")
+st.caption(f"Min Picked_At: {summary['min_picked']} · Max Picked_At: {summary['max_picked']}")
+if summary["missing_pick"]:
+    st.warning(f"Bez Picked_At: {summary['missing_pick']:,} joblines. Chýbajúce časy sa nedopĺňajú odhadom.")
+if picked.empty:
+    st.info("Žiadne vyplnené časy pickovania.")
+else:
+    st.plotly_chart(lines(picked, ["count", "count_scaled"], "Joblines picked over time for selected collection day"), width="stretch")
+
+st.subheader("4. Collection / cutoff / dispatch distribution")
+tabs = st.tabs(["Reálne hodnoty", "Cieľový objem"])
+for tab, column in zip(tabs, ["count", "count_scaled"]):
+    with tab:
+        st.plotly_chart(px.bar(collections, x="hour", y=column, color="job_type", barmode="stack",
+                               title="Svozy po hodinách podľa procesu", template="plotly_white"), width="stretch")
+
+st.subheader("5. Cumulative curves")
+st.plotly_chart(lines(hourly, ["cumulative_available_scaled", "cumulative_required_scaled", "cumulative_simulated"],
+                      "Planning okno: dostupnosť, splatná potreba a simulované pickovanie · cieľ"), width="stretch")
+st.caption("Dostupnosť zahŕňa carry-in pred planning oknom. Required vychádza z cutoffu mínus safety buffer. Simulácia modeluje celú kohortu od začiatku okna, nie zvyšok po historických pickoch.")
+
+st.subheader("6. Backlog / buffer")
 st.plotly_chart(backlog_chart(hourly), width="stretch")
-st.caption("Oranžová = rast backlogu. Červená = rast spolu s required výkonom nad limitom alebo minimálnou vyrovnanou špičkou. Backlog je evidencia vybranej kohorty.")
-st.dataframe(hourly[["hour", "backlog", "backlog_scaled", "backlog_growing", "backlog_risky"]], hide_index=True)
+st.plotly_chart(lines(hourly, ["backlog", "backlog_scaled", "scenario_backlog"], "Historický backlog a simulovaný dostupný buffer"), width="stretch")
+st.caption("Oranžová = historický backlog rastie. Červená = simulácia nestihla kumulatívnu potrebu. Každý bod je stav na konci hodiny.")
 
-st.subheader("5. Distribution by collection / cutoff / dispatch time")
-collections = collection_distribution(data)
-if collections.empty:
-    st.warning("Čas svozu/cutoffu nie je dostupný. Distribúciu nie je možné zobraziť.")
-else:
-    collections["joblines_scaled"] = collections.jobline_count * factor
-    st.plotly_chart(px.bar(collections, x="collection_hour", y=["jobline_count", "joblines_scaled"],
-                           barmode="group", title="Objem podľa hodiny cutoffu (vrátane nasledujúcich dní)"), width="stretch")
-    due = data.loc[data.cutoff_at.notna(), ["cutoff_at", "jobline_count"]].groupby("cutoff_at", as_index=False).sum()
-    due["latest_picking_time"] = due.cutoff_at - pd.Timedelta(hours=safety)
-    due["joblines_scaled"] = due.jobline_count * factor
-    st.dataframe(due, hide_index=True)
-
-st.subheader("6. Required picking performance")
-st.plotly_chart(lines(hourly, ["required_pick_count", "required_pick_scaled"], "Baseline: posledná plná prípustná hodina pre každú jobline"), width="stretch")
-if structural_missing:
-    st.error(f"Bez platnej plánovacej hodiny: {structural_missing:,.0f} reálnych / {structural_missing * factor:,.1f} cieľových joblines. Sú mimo krivky, zostávajú v celkovom objeme.")
-    rejected = plan.unscheduled.assign(count_scaled=plan.unscheduled["count"] * factor)
+st.subheader("7. Required picking performance")
+st.plotly_chart(lines(hourly, ["required_pick_count", "required_pick_scaled"], "Potrebný objem v poslednej celej hodine pred pick deadline"), width="stretch")
+st.caption("Celé hodinové sloty: 06:10 vznik → najskôr 07:00–08:00. Cutoff 14:30 a safety 1 h → deadline 13:30, posledný celý slot 12:00–13:00. Ide o konzervatívnu hodinovú presnosť.")
+if plan.overdue_before_window:
+    st.warning(f"Potreba už pred začiatkom planning okna: {plan.overdue_before_window:,.0f} joblines.")
+if structural:
+    st.error(f"Objem bez prípustnej celej hodiny: {structural:,.0f} reálnych / {structural * factor:,.1f} cieľových joblines. Zostáva v required potrebe a v nenaplánovanom objeme.")
+    rejected = plan.unscheduled.assign(scaled=plan.unscheduled["count"] * factor)
     rejected["reason"] = rejected.reason.replace({
-        "invalid_pick_order": "Pickovanie pred vznikom",
-        "missing_cutoff_and_pick": "Chýba cutoff aj pickovanie",
-        "no_full_slot_before_deadline": "Medzi vznikom a deadline nie je celá voľná hodina",
-    })
-    st.dataframe(rejected.rename(columns={"reason": "Dôvod", "count": "Reálny objem", "count_scaled": "Cieľový objem"}), hide_index=True)
-st.caption("Baseline je najneskoršie možné pickovanie. Vyhladený plán nižšie ho môže presunúť skôr. Zvyšujúci sa cieľový objem zachováva historický časový profil a mix.")
+        "missing_created": "Neznámy čas vzniku", "missing_collection": "Neznámy cutoff",
+        "deadline_before_creation": "Deadline pred vznikom", "deadline_before_planning_window": "Deadline pred planning oknom",
+        "deadline_after_planning_window": "Deadline po planning okne", "no_full_slot_before_deadline": "Nie je dostupný celý hodinový slot"})
+    st.dataframe(rejected, hide_index=True)
 
-st.subheader("7. Pre-picking simulation")
-st.plotly_chart(lines(hourly, ["required_pick_scaled", "prepick_smoothed_scaled", "prepick_difference_scaled"], "Cieľový objem: pôvodný plán, predpickovanie a rozdiel"), width="stretch")
+st.subheader("8. Pre-picking simulation")
+st.plotly_chart(lines(hourly, ["required_pick_scaled", "prepick_smoothed_scaled", "prepick_difference_scaled"],
+                      "Cieľový objem: baseline, vyhladené pickovanie a rozdiel"), width="stretch")
 cols = st.columns(4)
-for col, label, value in zip(cols, ["Maximum pred (jl/h)", "Maximum po (jl/h)", "Priemer po (jl/h)", "Nenaplánovaný cieľový objem"],
-                             [hourly.required_pick_scaled.max(), scenario.peak, float(scenario.hourly.mean()), unplanned_target]):
+for col, label, value in zip(cols, ["Maximum pred (jl/h)", "Maximum po (jl/h)", "Priemer po (jl/h)", "Unmet / infeasible volume"],
+                             [hourly.required_pick_scaled.max(), scenario.peak, scenario.hourly.mean(), unmet]):
     col.metric(label, f"{value:,.1f}")
-if unplanned_target > max(1e-4, target * 1e-9):
-    st.error("Scenár nie je splniteľný pri zvolených časových pravidlách a prípadnom výkonovom limite. Nenaplánovaný objem sa nestratil ani nepresunul za deadline.")
-elif plan.fallback_count:
-    st.warning("Objem sa do modelu zmestí, ale časť deadline je iba odhad podľa pickovania. Splnenie expedície tým nie je potvrdené.")
+if unmet > max(1e-4, target * 1e-9):
+    st.error("Scenár nie je splniteľný pri zvolenom planning okne a prípadnom hodinovom limite. Nenaplánovaný objem sa nestratil ani nepresunul za deadline.")
 else:
-    st.success("Scenár je časovo splniteľný v modeli celých hodín. Over dostupnosť ľudí, zásob a procesný význam cutoffu.")
-if cap is None:
-    st.info(f"Najnižší vypočítaný špičkový výkon pri tomto okne predpickovania: {scenario.peak:,.1f} jl/h.")
-st.caption("Optimalizácia minimalizuje maximum hodinového objemu. Jedna hodina má spoločný limit pre všetky joblines. Výsledok je objemový scenár s desatinnými hodnotami, nie rozpis jednotlivých pickerov.")
-st.plotly_chart(lines(hourly, ["backlog_scaled", "scenario_backlog"], "Historický a simulovaný backlog · cieľový objem"), width="stretch")
+    st.success("Cieľový objem sa zmestí do dostupných hodín a zadaného limitu v hodinovom modeli.")
+st.caption("Plán minimalizuje hodinovú špičku spoločným fondom kapacity. Hodiny pred vznikom a po deadline sú zakázané. Planning lookback predlžuje celé okno, nie interval každej jobline o rovnaký počet hodín.")
 
-st.subheader("8. Tables and export")
+st.subheader("9. Tables and export")
 st.dataframe(hourly, hide_index=True)
-st.download_button("Hodinové metriky CSV", csv_bytes(hourly), "sklc3_hourly.csv", "text/csv")
-st.download_button("Distribúcia cutoffov CSV", csv_bytes(collections), "sklc3_cutoffs.csv", "text/csv")
-st.download_button("Audit pridelenia do hodín CSV", csv_bytes(scenario.allocations), "sklc3_schedule_audit.csv", "text/csv")
-scenario_summary = pd.DataFrame([dict(logistic_day=str(day), start=start.isoformat(), end=end.isoformat(), source=source,
-                                     actual_volume=actual, target_volume=target, scaling_factor=factor,
-                                     safety_hours=safety, prepick_hours=lookback, max_per_hour=cap,
-                                     scheduled_target=scenario.scheduled, unscheduled_target=unplanned_target,
-                                     peak=scenario.peak, missing_cutoff=summary["missing_cutoff"], cancelled=summary["cancelled"])])
-st.download_button("Parametre a výsledok scenára CSV", csv_bytes(scenario_summary), "sklc3_scenario.csv", "text/csv")
+audit = scenario.allocations.copy()
+if len(audit):
+    audit["slot_start"] = hours[audit.hour.to_numpy(dtype=int)]
+    audit["slot_end"] = audit.slot_start + pd.Timedelta(hours=1)
+scenario_summary = pd.DataFrame([dict(collection_start=start.isoformat(), collection_end=end.isoformat(),
+        planning_start=hours[0].isoformat(), timezone=timezone, source=source,
+        real_volume=actual, target_volume=target, scaling_factor=factor, lookback_hours=lookback,
+        safety_hours=safety, max_per_hour=cap, scheduled=scenario.scheduled, unmet=unmet,
+        structural_infeasible_scaled=structural * factor, capacity_unmet=scenario.unscheduled,
+        allowed_job_types=",".join(config.allowed_job_types))])
+exports = [(created,"created_timeline"), (picked,"picked_timeline"), (collections,"collection_distribution"),
+           (hourly,"planning_hourly"), (hourly[["hour","required_pick_count","required_pick_scaled"]],"required_performance"),
+           (hourly[["hour","prepick_smoothed_count","prepick_smoothed_scaled"]],"prepick_performance"),
+           (hourly[["hour","backlog","backlog_scaled","scenario_backlog","backlog_risky"]],"backlog"),
+           (audit,"schedule_audit"), (scenario_summary,"scenario_parameters")]
+for frame, name in exports:
+    st.download_button(f"Export {name} CSV", csv_bytes(frame), f"sklc3_{name}.csv", "text/csv")

@@ -1,12 +1,15 @@
 # SKLC3 Warehouse Picking Performance
 
-Python / Streamlit aplikácia pre vznik joblines, pickovanie, backlog, cutoffy,
-škálovanie objemu a vyrovnávanie pickovacieho výkonu. Predvolený logistický deň je
-**15. 10. 2026 06:00 – 16. 10. 2026 06:00, Europe/Bratislava**.
+Streamlit aplikácia pre plánovanie hodinového pickovania skladu SKLC3. Vyberá
+**svozovú kohortu podľa collection/cutoff/dispatch času**, zobrazuje celú históriu
+vzniku a pickovania, počíta buffer, potrebný výkon a vyrovnaný plán predpickovania.
 
-## Spustenie
+Predvolený deň: **15. 10. 2026 06:00 – 16. 10. 2026 06:00**,
+`Europe/Bratislava`. Predvolený planning lookback: **24 h**.
 
-Odporúčaný Python: **3.12+**, overenie je zaznamenané v `VALIDATION.md`.
+## Inštalácia a spustenie
+
+Odporúčaný Python: **3.12**. Priame závislosti sú pripnuté na overené verzie.
 
 ```powershell
 python -m venv .venv
@@ -15,221 +18,245 @@ python -m pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Na Linuxe/macOS aktivuj prostredie cez `source .venv/bin/activate`.
-Aplikácia ponúka BigQuery a explicitný **DEMO** režim. Ak je priložený overený
-snapshot v `data/`, je predvoleným zdrojom a funguje bez credentials aj internetu.
-DEMO vytvorí presne 124 000 syntetických joblines s oneskoreným pickovaním a
-viacerými cutoffmi. Pri chybe BigQuery aplikácia zobrazí hlášku a umožní prepnúť
-zdroj na DEMO; neprepne sa na syntetické dáta potichu.
+Linux/macOS: aktivácia `source .venv/bin/activate`. Server sa štandardne viaže na
+`127.0.0.1`, nie na verejné rozhranie. Pri hostovaní nastav server address podľa
+hostovacej platformy. Bez explicitných credentials sa predvolí viditeľne označený
+DEMO režim. S lokálnym ADC možno BigQuery zvoliť manuálne v sidebare.
 
-## BigQuery a autentifikácia
+## Hlavné pravidlá
 
-Zdrojový projekt: `p-plat-datadf-l1st`, dataset `L1_LogisticsViews`, región
-`europe-west4`. **Query/billing projekt je `d-log-bi-common`.** Konektor používa
-iba SELECT, nevytvára cieľové tabuľky ani nemení zdrojové objekty.
-Dotazy sa cacheujú 15 minút; tlačidlo v sidebare vyčistí query cache.
+- Hlavný dátumový filter je `collection_at >= start AND collection_at < end`.
+- **Created_At nie je filter dňa.** Vybraná jobline mohla vzniknúť aj niekoľko dní
+  pred svozovým dňom alebo, pri nekonzistentnom zdroji, až po deadline.
+- Celé created a picked timeline sa zobrazujú od minima po maximum príslušnej
+  udalosti vo vybranej kohorte, s granularitou hour/day a nulovými medzerami.
+- Filter skladu je `Branch_ID=6281 OR Store LIKE '%SKLC3%'`.
+- Povolené procesy: **Expedícia - Standard, Distribúcia - LC, Distribúcia - POB**.
+- Príjem, expedičný podtyp Balíkový a ostatné procesy sú z predvoleného výberu
+  vyradené. Balíkové sledovacie záznamy sa nepovažujú za ďalšiu pickovaciu prácu.
 
-Skopíruj `.env.example` na `.env` alebo `.streamlit/secrets.toml.example` na
-`.streamlit/secrets.toml`. Tieto lokálne súbory sú v `.gitignore`.
-Poradie konfigurácie: environment / `.env` > Streamlit secrets > predvolené hodnoty.
+## BigQuery konfigurácia
 
-Podporované credentials:
+Skopíruj `.env.example` na `.env` alebo
+`.streamlit/secrets.toml.example` na `.streamlit/secrets.toml`. Obe konfigurácie
+obsahujú rovnaké nastavenia. Environment/.env má prednosť pred secrets.
 
-1. `GOOGLE_APPLICATION_CREDENTIALS` s cestou k servisnému JSON kľúču.
-2. `[gcp_service_account]` v Streamlit secrets; príklad je v súbore secrets.
-3. Application Default Credentials, napríklad existujúce lokálne ADC.
-
-Pri explicitných Streamlit service-account secrets majú tieto credentials prednosť
-pred ADC a premennou `GOOGLE_APPLICATION_CREDENTIALS`. Prístup konektora v chate sa
-automaticky neprenáša do lokálnej Streamlit aplikácie. Service account potrebuje
-čítanie zdrojových views a spustenie query jobov v billing projekte. Žiadne skutočné
-credentials nie sú súčasťou projektu.
-
-### Skutočná logistická schéma (`BQ_MODE=joined`)
-
-| Zdroj | Použitie |
-|---|---|
-| `v_StoreJobLines` | StoreJobLine_ID, StoreJob_ID, Store_ID, Created |
-| `v_StoreJobs` | Branch_ID, DepartureLimitTime |
-| `v_StoreJobLineStates` | PickedDate, StornoDate |
-| `v_Stores` | číselné Store_ID → textový názov Store |
-
-Najnovšia verzia podľa `load_timestamp` sa vyberá **pred** filtrom logistického dňa.
-Existujúce views už filtrujú `is_deleted=false`. Pri rovnakom ID a rovnakom
-`load_timestamp` treba v zdroji zabezpečiť deterministické verzie.
-
-Výber kohorty:
-
-```sql
-created_at >= @start AND created_at < @end
-AND (branch_id = @branch_id
-     OR STRPOS(UPPER(store_name), @store_pattern) > 0
-     OR STRPOS(UPPER(store_id), @store_pattern) > 0)
+```dotenv
+GCP_PROJECT_ID=p-plat-datadf-l1st
+BQ_BILLING_PROJECT=d-log-bi-common
+BQ_DATASET=L1_LogisticsViews
+BQ_TABLE=v_StoreJobLines
+BQ_MODE=joined
+BQ_LOCATION=europe-west4
+BRANCH_ID=6281
+STORE_PATTERN=%SKLC3%
+ALLOWED_JOB_TYPES=Expedícia - Standard,Distribúcia - LC,Distribúcia - POB
+TIMEZONE=Europe/Bratislava
+DEFAULT_LOGISTIC_START_TIME=06:00
 ```
 
-Parametre sú `6281` a `SKLC3`. V tejto schéme je `Store_ID` číslo; textové hľadanie
-preto zahŕňa názov cez `v_Stores`. Neobmedzujeme sa iba na hlavný Store_ID 10686:
-podmienka zámerne zahŕňa celú požadovanú branch alebo ďalšie názvy SKLC3.
-Nevylučujeme storná ani procesné typy bez obchodného pravidla. Počet so StornoDate
-sa uvádza v kvalite dát.
+`GCP_PROJECT_ID` označuje zdroj. **Query/billing projekt je d-log-bi-common.**
+Konektor vykonáva iba SELECT; nepíše do zdrojových ani cieľových tabuliek.
+Najnovšie verzie podľa `load_timestamp` vyberá pred filtrom dňa a typov.
+Veľké historické zdroje môžu vyžadovať rozsiahly scan. Query výsledky sa cacheujú
+15 minút; tlačidlo v sidebare cache vyčistí.
 
-`DepartureLimitTime` je nakonfigurovaný zdroj cutoffu. Jeho obchodný význam treba
-potvrdiť s vlastníkom procesu; aplikácia z neho nevytvára skutočný čas odjazdu.
+### Autentifikácia
 
-### Jedna tabuľka s mapovaním (`BQ_MODE=flat`)
+Podporované sú:
 
-Nastav project, dataset, table a `BQ_COLUMN_MAP_JSON`, napríklad:
+1. `GOOGLE_APPLICATION_CREDENTIALS` s cestou k servisnému JSON súboru.
+2. Streamlit secrets s `[gcp_service_account]` podľa priloženého príkladu.
+3. Application Default Credentials, napr. už nakonfigurované lokálne ADC.
+
+Explicitné service-account secrets majú prednosť pred ADC. Skutočné kľúče,
+`.env` ani `secrets.toml` nepatria do GitHubu. Service account musí vedieť čítať
+views a spúšťať joby v billing projekte. Prístup konektora v chate sa automaticky
+neprenáša do lokálnej Streamlit aplikácie.
+
+Pri chybe credentials, regiónu alebo schémy sa zobrazí hláška a zostane dostupný
+DEMO režim. Aplikácia sa neprepne potichu na syntetické dáta.
+
+### Joined režim pre skutočné logistické views
+
+| Zdroj | Úloha |
+|---|---|
+| v_StoreJobLines | ID jobline, vznik, Store_ID a StoreJob_ID |
+| v_StoreJobs | Branch_ID, DepartureLimitTime, JobType/SubType/Direction |
+| v_StoreJobLineStates | PickedDate a príznak StornoDate |
+| v_Stores | číselné Store_ID → textový názov skladu |
+
+Názvy doplnkových tabuliek sa nastavujú cez BQ_JOBS_TABLE, BQ_STATES_TABLE a
+BQ_STORES_TABLE. Store_ID je v skutočnej schéme číslo, preto sa textová podmienka
+SKLC3 vyhodnocuje aj nad názvom Store.
+
+Mapovanie procesov, overené oproti LookupLists (skupiny 29, 915, 32):
+
+| Názov | JobType_ID | JobSubType_ID | JobDirection_ID |
+|---|---:|---:|---:|
+| Expedícia - Standard | 1 | 1 | -1 |
+| Distribúcia - LC | 2 | 7 | -1 |
+| Distribúcia - POB | 2 | 8 | -1 |
+
+V joined režime sa textový job_type odvodí týmto mapovaním; JOB_TYPE_COLUMN je
+zdrojový stĺpec iba vo flat režime. Jednotlivé smery a podtypy sa nezlievajú.
+Storná sa automaticky nevylučujú; ich počet sa uvádza v kvalite dát.
+`DepartureLimitTime` je použitý cutoff. Jeho význam treba potvrdiť s vlastníkom
+procesu; nie je automaticky skutočným odjazdom vozidla.
+
+### Flat režim a mapovanie názvov stĺpcov
+
+Pre jednu pripravenú tabuľku alebo view nastav napríklad:
 
 ```dotenv
 BQ_MODE=flat
-BQ_TABLE=Joblines
-BQ_COLUMN_MAP_JSON={"id":"JobLine_ID","created":"Created_At","picked":"Picked_At","branch":"Branch_ID","store":"Store_Name","cutoff":"Cutoff_At","version":"load_timestamp"}
+BQ_TABLE=your_joblines_table
+JOBLINE_ID_COLUMN=JobLine_ID
+CREATED_TIME_COLUMN=Created_At
+PICKED_TIME_COLUMN=Picked_At
+COLLECTION_TIME_COLUMN=Collection_At
+BRANCH_ID_COLUMN=Branch_ID
+STORE_ID_COLUMN=Store_ID
+JOB_TYPE_COLUMN=Job_Type
+VERSION_COLUMN=load_timestamp
 ```
 
-Mapovanie možno upraviť aj v sidebare. Identifikátory sa validujú a iba potom
-vkladajú do SQL; dátumy, časové pásmo a hodnoty filtrov sú viazané parametre.
-Chýbajúci optional stĺpec nastav na `null` v JSON alebo prázdny reťazec v secrets.
-Povinné sú `id`, `created` a aspoň jedno z `branch`/`store`. `picked`, `cutoff` a
-`version` sú voliteľné. Bez version sa duplicity ID odhalia a výpočet sa zablokuje.
-Ak je store číselné ID, flat zdroj musí poskytovať branch alebo textový názov
-skladu cez pripravený view. Mapovanie časov predpokladá TIMESTAMP alebo jednoznačne
-konvertovateľný timestamp; nejednoznačný lokálny DATETIME treba previesť vo view.
+COLLECTION_TIME_COLUMN možno zmeniť na Cutoff_At alebo Dispatch_At. JOB_TYPE_COLUMN
+možno zmeniť na Process_Type, Operation_Type alebo iný názov. Hodnoty typu sa musia
+zhodovať s ALLOWED_JOB_TYPES; zoznam je nastaviteľný v env, secrets aj sidebare.
 
-Konektor vracia agregované skupiny, nie detailné ID. Unikátnosť sa overuje pred
-agregáciou. Zachováva hodinu vzniku/pickovania, konzervatívny čas pripravenosti,
-presný cutoff, počet a príznaky kvality. SQL vie čítať rozsiahlu históriu pri výbere
-latest verzií; zmena dátumu spúšťa nový dotaz. Query size je uvedená v pôvode dát.
+Mapovanie možno upraviť v sidebare cez JSON s kľúčmi id, created, picked,
+collection, branch, store, job_type, version. Bez dostupného Picked_At nastav picked
+na null (v env prázdnu hodnotu); vzniká warning a graf pickovania sa vynechá.
+Bez version sa duplicity ID kontrolujú a blokujú výpočet. Collection a job_type
+sú povinné pre výber kohorty. Chýbajúce hodnoty Created_At zostávajú v kohorte,
+ale bez známej dostupnosti sa nenaplánujú.
 
-## Kohorta a hodinové metriky
+Identifikátory sa validujú. Hodnoty sú viazané parametre: collection_start/end,
+branch_id, store_pattern, allowed_job_types (ARRAY<STRING>) a timezone.
+Query obsahuje `job_type IN UNNEST(@allowed_job_types)` a nemá created-date filter.
+Flat zdroj s číselným Store_ID musí poskytovať branch alebo textový názov skladu
+v namapovanom store stĺpci. Časové polia musia byť TIMESTAMP alebo jednoznačne
+konvertovateľné; nejednoznačný lokálny DATETIME preveď vo zdrojovom view.
 
-Kohorta sú joblines **vzniknuté** v zvolenom dni, nie všetky joblines so zvozom v dni.
-Časy ich pickovania a cutoffy môžu ležať po konci dňa a zostávajú vo vstupoch.
-Graf pickovania dňa zobrazuje iba pickovanie tejto kohorty vo vybranom intervale.
-Neobsahuje carry-in z predchádzajúcich dní; nejde teda o celkový výkon celého skladu
-zo všetkých historických kohort. Počet pickov po konci dňa je v Dataset overview.
-
-Hodina znamená interval `[H, H+1)`; kumulatívny stav je na jeho konci.
-`operational_hour=0` označuje prvú hodinu logistického dňa. Pri zmene letného času
-môže mať deň 23 alebo 25 hodín; offset časovej osi rozlišuje opakované hodiny.
+## Safety buffer a planning lookback
 
 ```text
-cumulative_created = priebežný súčet created_count
-cumulative_picked  = priebežný súčet picked_count
-backlog            = cumulative_created − cumulative_picked
+pick deadline = collection_at − safety_buffer_hours
+planning start = collection day start − lookback_hours
+planning end = collection day end
 ```
 
-Chýbajúce alebo neplatné povinné hodnoty, nekladné/neceločíselné počty a duplicitné ID
-blokujú výpočet. Časové rozpory sa reportujú; počty sa nestrácajú. Joblines s pickom
-pred vznikom sú vo výpočte historických metrík, ale zostanú nenaplánované.
+Default: safety 1 h a lookback 24 h. Pre 15. 10. je planning okno od
+**14. 10. 06:00 do 16. 10. 06:00**. Lookback možno nastaviť od 0 do 168 h.
+Predlžuje celé plánovacie okno, nie len posledných N hodín každej jobline.
+Staršia práca je na začiatku okna dostupný carry-in. Pri práci vzniknutej v okne
+sa rešpektuje jej skutočný vznik.
 
-## Prepočet na cieľový objem
+Model používa **iba celé hodinové sloty**. Vznik 06:10 umožní prvý slot 07–08;
+cutoff 14:30 a safety 1 h znamená deadline 13:30 a posledný slot 12–13.
+To je konzervatívne: model nevyužíva časť hodiny, ale nikdy neplánuje pred vznikom
+ani po presnom deadline. Zmena letného času zachová skutočné uplynuté hodiny.
 
-Predvolený cieľ je reálny objem po načítaní. Manuálne ho možno zmeniť:
+Required baseline priradí celý splatný objem do posledného celého slotu pred
+deadline. Zahŕňa aj dopyt, ktorý nie je možné splniť. Objem s deadline pred planning
+oknom sa zobrazí osobitne a vstupuje do kumulatívnej potreby. Chýbajúci vznik,
+deadline pred vznikom alebo absencia celého slotu sa vykazujú ako infeasible.
+
+Simulácia používa maximálny tok a bisekciu pre minimum spoločnej hodinovej špičky.
+Pracuje nad agregovanými skupinami rovnakých prípustných hodín, nerozbaľuje váhy na
+individuálne joblines. S maximálnym hodinovým limitom najprv nájde najväčší
+naplánovateľný objem; zvyšok zostane viditeľný ako unmet volume.
+Objem sa neodhaduje podľa historických pickov a neposúva sa za deadline.
+
+## Scaling a backlog
 
 ```text
-koeficient = cieľový_objem / reálny_objem
-prepočítaná_hodnota = reálna_hodnota × koeficient
+scaling_factor = target_volume / real_volume
+scaled_value = real_value × scaling_factor
 ```
 
-Rovnaký koeficient sa používa pre vznik, pickovanie, kumulatívne krivky, backlog,
-cutoffy a potrebný výkon. Príklad: `150000 / 124000 = 1.209677419…`.
-Výsledky sú desatinné objemové odhady, priebežne sa nezaokrúhľujú na celé joblines.
-Nulový cieľ dá nuly; pri prázdnom dni sa škálovanie a plánovanie nespustí.
-Scaling predpokladá rovnaký časový profil a mix ako reálny deň.
+Real volume je počet po filtroch collection dňa, skladu a procesov. Príklad:
+150000 / 124000 ≈ 1.209677. Rovnaký koeficient sa aplikuje na created/picked
+timeline, svozy, required výkon, kumulatívne krivky a buffer. Cieľ je defaultne
+reálny objem; nula je platný cieľ. Prázdna kohorta sa zobrazí bez delenia nulou.
 
-## Potrebný výkon a predpickovanie
+Historický backlog = kumulatívne vzniknuté mínus kumulatívne picknuté v planning
+okne vrátane carry-in. Simulovaný buffer = kumulatívne dostupné mínus kumulatívne
+simulované. Required curve vychádza zo svozov. Simulácia je scenár celej kohorty,
+nie simulácia zostávajúceho objemu po odpočítaní historických pickov.
+Pri zadanom maxime sa cieľový scenár optimalizuje samostatne; jeho krivka preto
+nemusí byť jednoduchým násobkom nelimitovanej reálnej simulácie.
 
-Presný pick deadline = cutoff mínus používateľský bezpečnostný predstih.
-Baseline priradí každú jobline do **poslednej celej hodiny**, ktorá sa končí pred
-alebo presne na deadline a začína najskôr pri jej pripravenosti.
-Jobline vzniknutá 06:10 môže využiť až slot 07:00–08:00; cutoff 09:30 s predstihom
-1 h má deadline 08:30 a posledný celý slot je 07:00–08:00.
-Toto je konzervatívny hodinový plán, nie optimalizácia čiastočných hodín.
+## Sekcie a exporty
 
-Pri cutoffe po konci dňa model explicitne požaduje dokončiť kohortu už do konca
-sledovaného dňa a zobrazí upozornenie. Ak platný celý slot neexistuje, objem zostáva
-v tabuľke nenaplánovaných. Nie je odhodený ani presunutý za deadline.
+1. Dataset overview: interval, mapovanie, procesy, unikátne ID, chýbajúce časy,
+   min/max udalostí, počty podľa typu a scaling.
+2. Created timeline: celá história, hour/day, reálne a cieľové počty.
+3. Picked timeline: celá história a explicitne chýbajúce pickovanie.
+4. Collection distribution: hlavný deň a rozdelenie podľa typu.
+5. Cumulative curves: dostupnosť, required a simulované pickovanie.
+6. Backlog: historický a simulovaný stav, rast a rizikové hodiny.
+7. Required picking performance: baseline a nenaplánovateľný dopyt.
+8. Pre-picking simulation: zníženie špičky, priemer, limit a unmet volume.
+9. Tables and export: samostatné CSV časových radov, svozov, required, simulácie,
+   backlogu, auditu rozdelenia do slotov a parametrov scenára.
 
-Chýbajúci cutoff používa **označený fallback** podľa skutočnej hodiny pickovania.
-Bez cutoffu aj pickovania nemožno termín odhadnúť a objem zostane nenaplánovaný.
-Pri čiastočne chýbajúcich cutoffoch sa fallback použije len pre príslušnú časť.
-Historická hodina pickovania nie je potvrdený deadline expedície.
+CSV je UTF-8 BOM, textové bunky so začiatkom vzorca sú chránené apostrofom.
+Časy v audite majú offset, takže opakovaná hodina pri DST je rozlíšená.
 
-Predpickovanie dovolí posun maximálne N hodín pred baseline, stále až po vzniku.
-Praktický algoritmus s maximálnym tokom a bisekciou minimalizuje špičkový výkon
-pri zachovaní objemu a spoločnej hodinovej kapacity. Pracuje nad skupinami rovnakých
-prípustných slotov, nie rozbalením počtov na stovky tisíc joblines.
+## Demo a lokálny export
 
-Ak je zadaný maximálny výkon, platí pre **cieľový objem**. Algoritmus najprv zistí
-maximálny objem, ktorý sa zmestí pod limit, a minimalizuje jeho špičku. Zvyšok sa
-vykáže ako nenaplánovaný. Čiastočne naplánovaná hladká krivka sa neoznačí za úspech.
-`prepick_smoothed_count` je optimalizácia reálneho objemu bez limitu a
-`prepick_smoothed_scaled` optimalizácia cieľového scenára s prípadným limitom.
-Bez limitu sú navzájom škálované; s limitom ide o samostatný scenár.
+DEMO obsahuje presne 124 000 vážených joblines pred používateľskými filtrami.
+Collection leží vo zvolenom dni, vznik je do 72 h pred svozom, pickovanie medzi
+vznikom a svozom. Obsahuje iba tri povolené typy.
 
-## Sekcie a export
-
-Dataset overview; Hourly created vs picked; Cumulative curves; Backlog / buffer;
-Distribution by cutoff; Required picking performance; Pre-picking simulation;
-Tables and export. Plotly grafy majú interaktívny hover a legendu.
-
-CSV UTF-8 BOM exporty obsahujú hodinové metriky, cutoff distribúciu, audit
-pridelenia do hodín a parametre/výsledok scenára. Textové bunky začínajúce znakmi
-vzorcov sú chránené apostrofom. Audit má release/latest/earliest/hour a počet,
-takže rešpektovanie okna možno skontrolovať.
-
-## Štruktúra
-
-```text
-app.py
-src/config.py              env / secrets / bezpečné mapovanie
-src/bigquery_client.py     parameterized SELECT a autentifikácia
-src/data_processing.py     kohorta, čas, hodinové počty, demo
-src/performance.py         baseline, scaling, nenaplánovaná práca
-src/prepicking.py          minimax plánovanie so spoločným limitom
-src/plots.py               Plotly
-src/utils.py               CSV a kontrolný súčet snapshotu
-tests/                     výpočty, query contract, Streamlit AppTest
-data/                      lokálny snapshot a jeho pôvod, ak je priložený
-.env.example
-.streamlit/secrets.toml.example
-requirements.txt
-requirements-dev.txt
-```
-
-## Obnovenie lokálneho snapshotu
-
-S nakonfigurovanými credentials možno explicitne spustiť:
+S vlastnými credentials možno explicitne exportovať lokálny snapshot:
 
 ```powershell
 python scripts/refresh_snapshot.py --date 2026-10-15 --start 06:00
 ```
 
-Skript vykoná čítací SELECT, overí výsledok a uloží CSV, metadáta, kontrolný súčet
-a SQL do `data/`. Nemení zdrojové tabuľky. Každé obnovenie môže čítať rozsiahlu
-históriu, preto nie je súčasťou bežného otvorenia lokálneho snapshotu.
-Konkrétna analýza dodaného dňa je v `ANALYSIS.md`.
+Snapshot aj exporty sa ukladajú do ignorovaných priečinkov. Produkčné agregáty
+ani kľúče nie sú súčasťou novej verzie repozitára. Aplikácia číta BigQuery alebo
+generuje DEMO; starý created-day snapshot sa už nenačítava.
 
-## Automatické overenie
+## Testy a štruktúra
 
 ```powershell
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-Testuje sa scaling, zachovanie objemu, vznik/cutoff/predpick okno, známe optimum,
-nesplniteľný limit, nulový cieľ, chýbajúce časy, duplicitné ID, filter OR, hranice
-intervalu, DST, query parametre a Streamlit app vrátane chyby credentials.
+Testy pokrývajú všetkých šesť požadovaných pravidiel, carry-in, DST, nulový cieľ,
+nesplniteľný limit, známe optimum simulácie, parameter binding, konfigurovateľnú
+schému a Streamlit UI. Testy sa spúšťajú lokálne na Python 3.12.
+
+```text
+app.py
+src/config.py              env, secrets, typy, mapovanie
+src/bigquery_client.py     collection-day SELECT, auth a parametre
+src/data_processing.py     kohorta, timeline a carry-in
+src/performance.py         deadline, required, scaling
+src/prepicking.py          vyrovnávanie a spoločný limit
+src/plots.py               Plotly grafy
+src/demo_data.py           syntetická svozová kohorta
+src/utils.py               bezpečný CSV export
+scripts/refresh_snapshot.py
+tests/
+```
 
 ## Známe obmedzenia
 
-- Jobline je jednotka práce, nie počet kusov (`Amount`) ani normovaný čas SKU.
-- Bez typov procesov a pravidiel storna nemožno MissingPicked interpretovať ako
-  skutočnú nedokončenú prácu ani merať výkon pracovníkov.
-- Model predpokladá spoločný fond kapacity a celodennú dostupnosť hodinových slotov.
-  Zmeny, prestávky, dostupnosť zásob a samostatný výkon balenia sa nemodelujú.
-- Bezpečnostný predstih je čas, nie percentuálna rezerva kapacity.
-- Optimalizácia je offline scenár známej kohorty; nie forecast budúcich objednávok.
-- Snapshot je stav zdrojov v čase extrakcie, nie historický stav databázy o 06:00.
-- Agregované interné prevádzkové dáta treba zdieľať podľa interných pravidiel.
-  Dodaný balík je lokálny; upload do GitHub nebol vykonaný automaticky.
+- Chýbajúci collection čas nemožno priradiť k dňu, preto sa vyradí dátumovým filtrom.
+  Nulový počet chýbajúcich cutoffov po filtroch neznamená úplný celý zdroj.
+- Jobline je jednotka práce, nie počet kusov ani normovaný čas konkrétneho SKU.
+- Bez procesného pravidla sa storná automaticky nevylučujú. Chýbajúce pickovanie
+  samo osebe nie je dôkaz nedokončenej fyzickej práce.
+- Model predpokladá spoločný fond kapacity a nepočíta prestávky, zmeny, zásoby ani
+  samostatný výkon balenia. Safety buffer je čas, nie percentuálna kapacitná rezerva.
+- Ide o offline scenár známej kohorty. Nie je to forecast budúcich objednávok.
+- Agregované SQL zachová presné min/max event časov, presný cutoff a konzervatívny
+  release; samotné created/picked grafy sú hodinové alebo denné.
+- Latest zdrojové verzie nie sú rekonštrukciou historického stavu databázy.
+  Pri rovnakom ID a load_timestamp musí zdroj zabezpečiť jednoznačnosť verzie.

@@ -1,45 +1,68 @@
 from dataclasses import replace
 from datetime import date
+from types import SimpleNamespace
 import pytest
-from src.config import BigQueryConfig, load_config
-from src.bigquery_client import build_query, query_parameters
+from src.config import BigQueryConfig, FLAT_COLUMNS, load_config, ALLOWED_JOB_TYPES
+from src.bigquery_client import build_query, query_parameters, load_joblines
 from src.data_processing import operational_window
 
 
-def test_joined_sql_contract_and_parameter_binding():
+def test_sql_filters_collection_and_types_not_created():
     config = BigQueryConfig()
     sql = build_query(config)
-    assert "@start" in sql and "@end" in sql and "@branch_id" in sql and "@store_pattern" in sql
-    assert "d-log-bi-common" not in sql
-    assert "v_StoreJobs" in sql and "st.Store AS store_name" in sql
-    assert sql.index("PARTITION BY StoreJob_ID") < sql.index("created_at >= @start")
-    assert "DELETE " not in sql and "CREATE " not in sql
+    assert "collection_at >= @collection_start" in sql
+    assert "collection_at < @collection_end" in sql
+    assert "job_type IN UNNEST(@allowed_job_types)" in sql
+    assert "created_at >=" not in sql and "created_at < @" not in sql
+    assert "JobDirection_ID=-1" in sql
+    assert "JobSubType_ID=6" not in sql
+    assert sql.index("PARTITION BY StoreJob_ID") < sql.index("collection_at >=")
+
+
+def test_array_parameter_and_billing_project():
     start, end = operational_window(date(2026, 10, 15))
-    params = {p["name"]: p["parameterValue"]["value"] for p in query_parameters(start, end)}
-    assert params["branch_id"] == "6281" and params["timezone"] == "Europe/Bratislava"
+    config = BigQueryConfig()
+    params = {item["name"]: item for item in query_parameters(config, start, end)}
+    assert params["allowed_job_types"]["parameterType"]["type"] == "ARRAY"
+    assert [v["value"] for v in params["allowed_job_types"]["parameterValue"]["arrayValues"]] == list(ALLOWED_JOB_TYPES)
+    assert params["store_pattern"]["parameterValue"]["value"] == "%SKLC3%"
     assert config.billing_project == "d-log-bi-common"
 
 
-def test_flat_column_mapping_and_missing_optional_columns():
-    config = replace(BigQueryConfig(), mode="flat", table="custom_joblines", columns={
-        "id": "JobLine_ID", "created": "Created_At", "picked": None, "cutoff": None,
-        "branch": "Branch_ID", "store": None, "version": None})
+def test_flat_mapping_identifiers_and_optional_pick():
+    config = replace(BigQueryConfig(), mode="flat", columns={**FLAT_COLUMNS, "picked": None, "version": None})
     sql = build_query(config)
-    assert "`JobLine_ID`" in sql and "`Created_At`" in sql
-    assert "CAST(NULL AS TIMESTAMP) AS cutoff_at" in sql
-    assert "COUNT(*) OVER(PARTITION BY jobline_id)" in sql
+    assert "l.`Collection_At`" in sql and "l.`Job_Type`" in sql
+    assert "CAST(NULL AS TIMESTAMP) AS picked_at" in sql
+    assert "id_occurrences" in sql
+    with pytest.raises(ValueError):
+        build_query(replace(config, table="table`; DROP TABLE x"))
+    with pytest.raises(ValueError):
+        build_query(replace(config, columns={**FLAT_COLUMNS, "collection": None}))
 
 
-def test_identifier_injection_is_rejected():
-    for config in [replace(BigQueryConfig(), table="table`; DROP TABLE x"),
-                   replace(BigQueryConfig(), columns={"id": "x`", "created": "Created"})]:
-        with pytest.raises(ValueError):
-            build_query(config)
+def test_environment_and_toml_configuration(monkeypatch):
+    monkeypatch.setenv("BQ_MODE", "flat")
+    monkeypatch.setenv("COLLECTION_TIME_COLUMN", "Dispatch_At")
+    monkeypatch.setenv("ALLOWED_JOB_TYPES", "Expedícia - Standard,Distribúcia - LC")
+    config = load_config({"bigquery": {"GCP_PROJECT_ID": "source-project", "JOB_TYPE_COLUMN": "Process_Type"}})
+    assert config.source_project == "source-project"
+    assert config.columns["collection"] == "Dispatch_At"
+    assert config.columns["job_type"] == "Process_Type"
+    assert len(config.allowed_job_types) == 2
 
 
-def test_environment_overrides_secrets(monkeypatch):
-    monkeypatch.setenv("BQ_BILLING_PROJECT", "d-log-bi-common")
-    monkeypatch.setenv("BQ_COLUMN_MAP_JSON", '{"created":"CreationTime"}')
-    config = load_config({"bigquery": {"billing_project": "another-project"}})
-    assert config.billing_project == "d-log-bi-common"
-    assert config.columns["created"] == "CreationTime"
+def test_python_client_binds_array_and_never_sets_destination(monkeypatch):
+    import src.bigquery_client as adapter
+    captured = {}
+    class Client:
+        def query(self, sql, job_config, location):
+            captured.update(sql=sql, job_config=job_config, location=location)
+            return SimpleNamespace(result=lambda timeout: [], job_id="read-only-test", total_bytes_processed=0)
+    monkeypatch.setattr(adapter, "make_client", lambda *a, **k: Client())
+    start, end = operational_window(date(2026, 10, 15))
+    _, provenance = load_joblines(BigQueryConfig(), start, end)
+    assert captured["job_config"].destination is None
+    parameters = captured["job_config"].to_api_repr()["query"]["queryParameters"]
+    assert next(p for p in parameters if p["name"] == "allowed_job_types")["parameterType"]["type"] == "ARRAY"
+    assert provenance["billing_project"] == "d-log-bi-common"
